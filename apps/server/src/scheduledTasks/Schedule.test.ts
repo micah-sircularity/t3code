@@ -68,7 +68,25 @@ describe("scheduled task schedule calculation", () => {
     );
   });
 
+  it("never schedules webhook tasks on a clock", () => {
+    // Webhook tasks fire when the automation webhook names them; there is no
+    // next run to compute, which is also what keeps the poll loop away.
+    expect(
+      nextScheduledRunAt({ type: "webhook" }, DateTime.makeUnsafe("2026-07-01T16:00:00.000Z")),
+    ).toBeNull();
+    // A webhook task can never be "missed": it is not time-based.
+    expect(
+      isMissedFixedTimeRun(
+        { type: "webhook" },
+        DateTime.makeUnsafe("2026-07-01T09:00:00.000Z"),
+        DateTime.makeUnsafe("2026-07-01T15:00:00.000Z"),
+      ),
+    ).toBe(false);
+  });
+
   it("compares schedules structurally", () => {
+    expect(isSameSchedule({ type: "webhook" }, { type: "webhook" })).toBe(true);
+    expect(isSameSchedule({ type: "webhook" }, { type: "interval", everyMs: 60_000 })).toBe(false);
     expect(
       isSameSchedule({ type: "interval", everyMs: 60_000 }, { type: "interval", everyMs: 60_000 }),
     ).toBe(true);

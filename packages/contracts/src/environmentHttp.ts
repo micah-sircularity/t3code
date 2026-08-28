@@ -5,6 +5,7 @@ import * as HttpApi from "effect/unstable/httpapi/HttpApi";
 import * as HttpApiEndpoint from "effect/unstable/httpapi/HttpApiEndpoint";
 import * as HttpApiGroup from "effect/unstable/httpapi/HttpApiGroup";
 import * as HttpApiMiddleware from "effect/unstable/httpapi/HttpApiMiddleware";
+import * as HttpApiSchema from "effect/unstable/httpapi/HttpApiSchema";
 import * as HttpServerRespondable from "effect/unstable/http/HttpServerRespondable";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
@@ -25,6 +26,14 @@ import {
   ServerAuthSessionMethod,
 } from "./auth.ts";
 import { AuthSessionId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  AutomationWebhookConflictError,
+  AutomationWebhookInvalidRequestError,
+  AutomationWebhookNotFoundError,
+  AutomationWebhookPayloadTooLargeError,
+  AutomationWebhookTriggerRequest,
+  AutomationWebhookTriggerResult,
+} from "./automationWebhook.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import {
   OrchestrationV2ShellSnapshot,
@@ -573,6 +582,28 @@ export class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullReque
   }).middleware(EnvironmentAuthenticatedAuth),
 ) {}
 
+/**
+ * Machine-to-machine automation triggers (external webhooks). Authenticated by
+ * a bearer session carrying only the standalone `automation:trigger` scope.
+ * Returns 202: the dispatch is accepted, the turn runs asynchronously.
+ */
+export class EnvironmentAutomationsHttpApi extends HttpApiGroup.make("automations").add(
+  HttpApiEndpoint.post("trigger", "/api/automations/trigger", {
+    headers: OptionalBearerHeaders,
+    payload: AutomationWebhookTriggerRequest,
+    success: AutomationWebhookTriggerResult.pipe(HttpApiSchema.status(202)),
+    error: [
+      AutomationWebhookInvalidRequestError,
+      AutomationWebhookNotFoundError,
+      AutomationWebhookConflictError,
+      AutomationWebhookPayloadTooLargeError,
+      EnvironmentAuthInvalidError,
+      EnvironmentScopeRequiredError,
+      EnvironmentInternalError,
+    ],
+  }).middleware(EnvironmentAuthenticatedAuth),
+) {}
+
 export class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
   .add(
     HttpApiEndpoint.post("linkProof", "/api/connect/link-proof", {
@@ -640,4 +671,5 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
   .add(EnvironmentProjectsHttpApi)
+  .add(EnvironmentAutomationsHttpApi)
   .add(EnvironmentConnectHttpApi) {}

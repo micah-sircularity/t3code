@@ -55,15 +55,28 @@ const ScheduledTaskFixedTimeSchedule = Schema.Struct({
 });
 
 /**
+ * Webhook-scheduled tasks never fire on a clock: they run when the automation
+ * webhook receives a request naming the task. `next_run_at` stays null.
+ */
+const ScheduledTaskWebhookSchedule = Schema.Struct({
+  type: Schema.Literal("webhook").annotate({
+    description: "Select webhook triggering.",
+  }),
+}).annotate({
+  description: "Run when the automation webhook endpoint receives a request for this task.",
+});
+
+/**
  * Read model for persisted schedules. Keep accepting legacy sub-minute rows so
  * users can list, disable, edit, or delete them after the write minimum changes.
  */
 export const ScheduledTaskSchedule = Schema.Union([
   ScheduledTaskIntervalSchedule,
   ScheduledTaskFixedTimeSchedule,
+  ScheduledTaskWebhookSchedule,
 ]).annotate({
   description:
-    "Structured recurring schedule. Pass an object with type 'interval' or 'fixed_time'.",
+    "Structured recurring schedule. Pass an object with type 'interval', 'fixed_time', or 'webhook'.",
 });
 export type ScheduledTaskSchedule = typeof ScheduledTaskSchedule.Type;
 
@@ -82,8 +95,10 @@ export const ScheduledTaskUpsertSchedule = Schema.Union([
     description: "Run repeatedly after a fixed number of milliseconds.",
   }),
   ScheduledTaskFixedTimeSchedule,
+  ScheduledTaskWebhookSchedule,
 ]).annotate({
-  description: "Writable recurring schedule. Pass an object with type 'interval' or 'fixed_time'.",
+  description:
+    "Writable recurring schedule. Pass an object with type 'interval', 'fixed_time', or 'webhook'.",
 });
 export type ScheduledTaskUpsertSchedule = typeof ScheduledTaskUpsertSchedule.Type;
 
@@ -177,6 +192,10 @@ export class ScheduledTaskError extends Schema.TaggedErrorClass<ScheduledTaskErr
   {
     message: Schema.String,
     taskId: Schema.optional(ScheduledTaskId),
+    /** Machine-readable failure class for webhook trigger mapping; absent for internal errors. */
+    reason: Schema.optional(
+      Schema.Literals(["not_found", "paused", "already_running", "dispatch_failed"]),
+    ),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}

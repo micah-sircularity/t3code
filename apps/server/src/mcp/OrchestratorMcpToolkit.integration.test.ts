@@ -568,6 +568,7 @@ describe("orchestrator MCP toolkit", () => {
                   all.filter((candidate) => candidate.id !== input.id),
                 ).pipe(Effect.as({ id: input.id })),
               runNow: () => Effect.die("ScheduledTaskService.runNow is unused in this test"),
+              fireTask: () => Effect.die("ScheduledTaskService.fireTask is unused in this test"),
             }),
           );
           const testLayer = McpHttpServer.OrchestratorToolkitRegistrationLive.pipe(

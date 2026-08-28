@@ -1,5 +1,7 @@
 import {
   AuthAdministrativeScopes,
+  AuthAutomationTriggerScope,
+  AuthEnvironmentScope,
   AuthSessionId,
   AuthStandardClientScopes,
 } from "@t3tools/contracts";
@@ -8,7 +10,13 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as References from "effect/References";
+import * as Schema from "effect/Schema";
 import { Argument, Command, Flag, GlobalFlag } from "effect/unstable/cli";
+
+/** A `--scope` value that is not a valid environment scope. */
+class InvalidScopeError extends Schema.TaggedErrorClass<InvalidScopeError>()("InvalidScopeError", {
+  message: Schema.String,
+}) {}
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 
@@ -68,6 +76,14 @@ const labelFlag = Flag.string("label").pipe(
 
 const subjectFlag = Flag.string("subject").pipe(
   Flag.withDescription("Optional session subject."),
+  Flag.optional,
+);
+
+const scopeFlag = Flag.string("scope").pipe(
+  Flag.withDescription(
+    "Issue the session with exactly this scope instead of the administrative set, " +
+      `for example "${AuthAutomationTriggerScope}" for an automation webhook API key.`,
+  ),
   Flag.optional,
 );
 
@@ -164,6 +180,7 @@ const sessionIssueCommand = Command.make("issue", {
   ttl: ttlFlag,
   label: labelFlag,
   subject: subjectFlag,
+  scope: scopeFlag,
   tokenOnly: tokenOnlyFlag,
   json: jsonFlag,
 }).pipe(
@@ -173,8 +190,19 @@ const sessionIssueCommand = Command.make("issue", {
       flags,
       (environmentAuth) =>
         Effect.gen(function* () {
+          const parseScope = Schema.decodeUnknownEffect(AuthEnvironmentScope);
+          const scopeOverride = Option.isSome(flags.scope)
+            ? yield* parseScope(flags.scope.value).pipe(
+                Effect.mapError(
+                  () =>
+                    new InvalidScopeError({
+                      message: `Invalid --scope. Valid scopes: ${AuthEnvironmentScope.literals.join(", ")}.`,
+                    }),
+                ),
+              )
+            : undefined;
           const issued = yield* environmentAuth.issueSession({
-            scopes: AuthAdministrativeScopes,
+            scopes: scopeOverride === undefined ? AuthAdministrativeScopes : [scopeOverride],
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
             ...(Option.isSome(flags.subject) ? { subject: flags.subject.value } : {}),

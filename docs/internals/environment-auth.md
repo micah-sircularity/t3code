@@ -21,6 +21,7 @@ OAuth-style scope strings:
 | `access:write`          | Create or revoke pairing links and client sessions.                      |
 | `relay:read`            | Inspect managed relay connectivity.                                      |
 | `relay:write`           | Link, configure, or unlink managed relay connectivity.                   |
+| `automation:trigger`    | Fire automations through the webhook trigger endpoint, nothing else.     |
 
 Ordinary pairing links grant the four client-operation scopes and read access to
 managed relay connectivity:

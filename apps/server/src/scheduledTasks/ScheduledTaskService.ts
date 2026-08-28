@@ -85,19 +85,55 @@ export class ScheduledTaskService extends Context.Service<
     readonly runNow: (
       input: ScheduledTaskRunNowInput,
     ) => Effect.Effect<ScheduledTaskRunNowResult, ScheduledTaskError>;
+    /**
+     * Fire a task from the automation webhook. Only enabled tasks can be
+     * triggered; the run is idempotent per `fireKey` when one is supplied.
+     */
+    readonly fireTask: (input: {
+      readonly taskId: ScheduledTaskId;
+      readonly event?: Record<string, unknown>;
+      readonly fireKey?: string;
+    }) => Effect.Effect<{ task: ScheduledTask; threadId: ThreadId }, ScheduledTaskError>;
   }
 >()("t3/scheduledTasks/ScheduledTaskService") {}
 
-function taskError(message: string, input?: { taskId?: ScheduledTaskId; cause?: unknown }) {
+function taskError(
+  message: string,
+  input?: {
+    taskId?: ScheduledTaskId;
+    cause?: unknown;
+    reason?: "not_found" | "paused" | "already_running" | "dispatch_failed";
+  },
+) {
   return new ScheduledTaskError({
     message,
     ...(input?.taskId === undefined ? {} : { taskId: input.taskId }),
+    ...(input?.reason === undefined ? {} : { reason: input.reason }),
     ...(input?.cause === undefined ? {} : { cause: input.cause }),
   });
 }
 
 function automationPrompt(task: ScheduledTask): string {
   return `[Triggered by schedule task: ${task.title}]\n\n${task.prompt}`;
+}
+
+/**
+ * Webhook firings carry the triggering event as a fenced JSON block so the
+ * agent can read the payload (issue number, PR title, CI status, …) without
+ * this server needing to interpret it.
+ */
+/**
+ * Webhook payloads ride along as a fenced JSON block so the agent can read
+ * the triggering event (issue number, PR title, CI status, …) without this
+ * server needing to interpret it.
+ */
+export function withEventBlock(prompt: string, event: Record<string, unknown> | undefined): string {
+  if (event === undefined) return prompt;
+  return `${prompt}\n\n[Webhook event payload]\n\`\`\`json\n${JSON.stringify(event, null, 2)}\n\`\`\``;
+}
+
+function webhookPrompt(task: ScheduledTask, event: Record<string, unknown> | undefined): string {
+  return withEventBlock(`[Triggered by webhook: ${task.title}]\n\n${task.prompt}`, event);
 }
 
 function iso(value: DateTime.DateTime): string {
@@ -264,7 +300,7 @@ export const layer = Layer.effect(
     const loadTask = Effect.fn("ScheduledTaskService.loadTask")(function* (id: ScheduledTaskId) {
       const task = yield* findTask(id);
       if (task === null) {
-        return yield* taskError("Schedule task not found.", { taskId: id });
+        return yield* taskError("Schedule task not found.", { taskId: id, reason: "not_found" });
       }
       return task;
     });
@@ -422,7 +458,13 @@ export const layer = Layer.effect(
 
     const runTask = Effect.fn("ScheduledTaskService.runTask")(function* (
       task: ScheduledTask,
-      trigger: "scheduled" | "manual",
+      trigger: "scheduled" | "manual" | "webhook",
+      options: {
+        /** Webhook event payload embedded into the dispatched prompt. */
+        readonly event?: Record<string, unknown>;
+        /** Caller-supplied idempotency key (e.g. GitHub delivery GUID); scoped to the task id. */
+        readonly fireKey?: string;
+      } = {},
     ) {
       const reserved = yield* Ref.modify(activeRuns, (active) => {
         if (active.has(task.id)) return [false, active] as const;
@@ -431,10 +473,13 @@ export const layer = Layer.effect(
         return [true, next] as const;
       });
       if (!reserved) {
-        if (trigger === "manual") {
-          return yield* taskError("Schedule task is already running.", { taskId: task.id });
+        if (trigger !== "scheduled") {
+          return yield* taskError("Schedule task is already running.", {
+            taskId: task.id,
+            reason: "already_running",
+          });
         }
-        return task;
+        return { task, threadId: null };
       }
 
       return yield* Effect.gen(function* () {
@@ -446,12 +491,21 @@ export const layer = Layer.effect(
         // the poll loaded it — none of those may fire.
         const active = yield* findTask(task.id);
         if (active === null) {
-          // A manual run on a just-deleted task must fail loudly, not report
-          // a successful run that never dispatched.
-          if (trigger === "manual") {
-            return yield* taskError("Schedule task not found.", { taskId: task.id });
+          // A manual or webhook run on a just-deleted task must fail loudly,
+          // not report a successful run that never dispatched.
+          if (trigger !== "scheduled") {
+            return yield* taskError("Schedule task not found.", {
+              taskId: task.id,
+              reason: "not_found",
+            });
           }
-          return task;
+          return { task, threadId: null };
+        }
+        if (trigger === "webhook" && !active.enabled) {
+          return yield* taskError("Schedule task is paused.", {
+            taskId: task.id,
+            reason: "paused",
+          });
         }
         if (
           trigger === "scheduled" &&
@@ -460,18 +514,22 @@ export const layer = Layer.effect(
             DateTime.toEpochMillis(DateTime.makeUnsafe(active.nextRunAt)) >
               DateTime.toEpochMillis(startedAt))
         ) {
-          return active;
+          return { task: active, threadId: null };
         }
 
         yield* markRunning(active.id, startedAtIso);
         yield* notifyChanged;
 
-        const fireKey = `${active.id}:${DateTime.toEpochMillis(startedAt)}:${trigger}`;
+        const fireKey =
+          trigger === "webhook" && options.fireKey !== undefined
+            ? `${active.id}:webhook:${options.fireKey}`
+            : `${active.id}:${DateTime.toEpochMillis(startedAt)}:${trigger}`;
         const commandId = CommandId.make(`scheduled-task:${fireKey}`);
         const messageId = MessageId.make(`scheduled-task-message:${fireKey}`);
         // Dispatch from the fresh row so prompt/model/binding edits made
         // after the poll read are honoured.
-        const prompt = automationPrompt(active);
+        const prompt =
+          trigger === "webhook" ? webhookPrompt(active, options.event) : automationPrompt(active);
 
         // Effect.exit (not Effect.result) so defects and interruptions in the
         // dispatch are also captured and recorded as a failed run instead of
@@ -510,6 +568,14 @@ export const layer = Layer.effect(
                   creationSource: active.creationSource,
                 }),
               );
+        // A launch dispatch creates the thread; a bound-thread dispatch runs
+        // on the task's own thread.
+        const threadId: ThreadId | null =
+          active.threadId !== null
+            ? ThreadId.make(active.threadId)
+            : result._tag === "Success" && "threadId" in result.value
+              ? result.value.threadId
+              : null;
 
         const completedAt = yield* localNow;
         const runSucceeded = result._tag === "Success";
@@ -542,7 +608,7 @@ export const layer = Layer.effect(
           });
           yield* notifyChanged;
         }
-        return completed;
+        return { task: completed, threadId };
       }).pipe(
         Effect.onError((cause) => releaseStuckRun(task, errorMessage(cause))),
         Effect.ensuring(
@@ -779,12 +845,36 @@ export const layer = Layer.effect(
     const runNow: ScheduledTaskService["Service"]["runNow"] = (input: ScheduledTaskRunNowInput) =>
       Effect.gen(function* () {
         const task = yield* loadTask(input.id);
-        const next = yield* runTask(task, "manual").pipe(
+        const { task: next } = yield* runTask(task, "manual").pipe(
           Effect.mapError((cause) =>
             taskError("Could not run schedule task.", { taskId: input.id, cause }),
           ),
         );
         return { task: next };
+      });
+
+    const fireTask: ScheduledTaskService["Service"]["fireTask"] = (input) =>
+      Effect.gen(function* () {
+        const task = yield* loadTask(input.taskId);
+        if (!task.enabled) {
+          return yield* taskError("Schedule task is paused.", {
+            taskId: task.id,
+            reason: "paused",
+          });
+        }
+        const { task: completed, threadId } = yield* runTask(task, "webhook", {
+          ...(input.event === undefined ? {} : { event: input.event }),
+          ...(input.fireKey === undefined ? {} : { fireKey: input.fireKey }),
+        });
+        // runTask only reports success after the dispatch was accepted, and
+        // every accepted dispatch produces a thread — this is defensive.
+        if (threadId === null) {
+          return yield* taskError("Schedule task dispatch did not produce a thread.", {
+            taskId: task.id,
+            reason: "dispatch_failed",
+          });
+        }
+        return { task: completed, threadId };
       });
 
     return ScheduledTaskService.of({
@@ -794,6 +884,7 @@ export const layer = Layer.effect(
       setEnabled,
       delete: deleteTask,
       runNow,
+      fireTask,
     });
   }),
 );
