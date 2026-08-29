@@ -84,6 +84,7 @@ import * as ThreadManagementService from "./orchestration-v2/ThreadManagementSer
 import { ProviderSessionManagerV2 } from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
+import * as AutomationEventLog from "./scheduledTasks/AutomationEventLog.ts";
 import {
   archivedShellStreamItemFromThreadShell,
   buildActiveShellSnapshot,
@@ -520,6 +521,7 @@ const makeWsRpcLayer = (
       );
       const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
+      const automationEvents = yield* AutomationEventLog.AutomationEventLog;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const usage = yield* UsageService.UsageService;
       const projectService = yield* ProjectService.ProjectService;
@@ -1416,6 +1418,14 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.scheduledTasksRunNow, scheduledTasks.runNow(input), {
             "rpc.aggregate": "scheduledTasks",
             "scheduled_task.id": input.id,
+          }),
+        [WS_METHODS.automationEventsList]: (_input) =>
+          observeRpcEffect(WS_METHODS.automationEventsList, automationEvents.list(), {
+            "rpc.aggregate": "automationEvents",
+          }),
+        [WS_METHODS.automationEventsSubscribe]: (_input) =>
+          observeRpcStream(WS_METHODS.automationEventsSubscribe, automationEvents.subscribeList(), {
+            "rpc.aggregate": "automationEvents",
           }),
         [WS_METHODS.serverProbe]: (_input) =>
           observeRpcEffect(WS_METHODS.serverProbe, Effect.succeed({}), {

@@ -2,7 +2,13 @@ import * as Schema from "effect/Schema";
 import * as HttpServerRespondable from "effect/unstable/http/HttpServerRespondable";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
-import { ProjectId, ScheduledTaskId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  IsoDateTime,
+  ProjectId,
+  ScheduledTaskId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 
 /**
  * Cap on the prompt-bearing content of a webhook trigger (prompt + serialized
@@ -15,7 +21,7 @@ export const MAX_AUTOMATION_WEBHOOK_CONTENT_CHARS = 262_144;
 export const MAX_AUTOMATION_WEBHOOK_FIRE_KEY_CHARS = 256;
 
 /** Arbitrary JSON object describing the triggering event; embedded into the run prompt. */
-const AutomationWebhookEvent = Schema.Record(Schema.String, Schema.Unknown);
+export const AutomationWebhookEvent = Schema.Record(Schema.String, Schema.Unknown);
 export type AutomationWebhookEvent = typeof AutomationWebhookEvent.Type;
 
 /**
@@ -115,3 +121,51 @@ export class AutomationWebhookPayloadTooLargeError extends Schema.TaggedErrorCla
     });
   }
 }
+
+/**
+ * One webhook delivery the environment received, accepted or rejected.
+ * Retention is bounded (oldest pruned on insert); payloads are stored as
+ * received, already capped by the trigger content limit.
+ */
+export const AutomationEventLogEntry = Schema.Struct({
+  id: TrimmedNonEmptyString.annotate({ description: "Delivery id, newest-first sortable." }),
+  receivedAt: IsoDateTime,
+  outcome: Schema.Literals(["accepted", "rejected"]),
+  httpStatus: Schema.Int.check(Schema.isGreaterThan(0)),
+  mode: Schema.NullOr(Schema.Literals(["task", "adhoc"])).annotate({
+    description: "Null when the request was malformed before a mode could be resolved.",
+  }),
+  taskId: Schema.NullOr(ScheduledTaskId),
+  projectId: Schema.NullOr(ProjectId),
+  threadId: Schema.NullOr(ThreadId).annotate({
+    description: "Thread the run dispatched to; null for rejected deliveries.",
+  }),
+  fireKey: Schema.NullOr(TrimmedNonEmptyString),
+  /** Subject and session id of the API key that sent the delivery. */
+  keySubject: TrimmedNonEmptyString,
+  keySessionId: TrimmedNonEmptyString,
+  errorCode: Schema.NullOr(TrimmedNonEmptyString),
+  errorMessage: Schema.NullOr(Schema.String),
+  eventJson: Schema.NullOr(Schema.String).annotate({
+    description: "The event payload as received (JSON string); null when absent.",
+  }),
+});
+export type AutomationEventLogEntry = typeof AutomationEventLogEntry.Type;
+
+export const AutomationEventListInput = Schema.Struct({});
+export type AutomationEventListInput = typeof AutomationEventListInput.Type;
+
+export const AutomationEventListResult = Schema.Struct({
+  events: Schema.Array(AutomationEventLogEntry).annotate({
+    description: "Recent deliveries, newest first, bounded by retention.",
+  }),
+});
+export type AutomationEventListResult = typeof AutomationEventListResult.Type;
+
+export class AutomationEventError extends Schema.TaggedErrorClass<AutomationEventError>()(
+  "AutomationEventError",
+  {
+    message: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}

@@ -3,7 +3,6 @@ import {
   AutomationWebhookInvalidRequestError,
   AutomationWebhookNotFoundError,
   AutomationWebhookPayloadTooLargeError,
-  AutomationWebhookTriggerResult,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
@@ -16,8 +15,10 @@ import {
   ProjectId,
   ScheduledTaskId,
   ThreadId,
+  AutomationWebhookEvent,
   type AutomationWebhookTriggerRequest,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -31,7 +32,12 @@ import {
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import { getAutoBootstrapDefaultModelSelection } from "../serverRuntimeStartup.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as AutomationEventLog from "./AutomationEventLog.ts";
 import { ScheduledTaskService, withEventBlock } from "./ScheduledTaskService.ts";
+import { fromJsonStringPretty } from "@t3tools/shared/schemaJson";
+
+const encodeEventJson = Schema.encodeUnknownEffect(fromJsonStringPretty(AutomationWebhookEvent));
 
 /**
  * Resolved trigger intent. Validation both checks the request and resolves
@@ -142,6 +148,25 @@ export function mapScheduledTaskError(
   }
 }
 
+/**
+ * HTTP status for a recorded rejection, derived from the error tag so the
+ * delivery log's `http_status` always matches what the client saw.
+ */
+function httpStatusForError(error: { readonly _tag: string }): number {
+  switch (error._tag) {
+    case "AutomationWebhookNotFoundError":
+      return 404;
+    case "AutomationWebhookConflictError":
+      return 409;
+    case "AutomationWebhookInvalidRequestError":
+      return 422;
+    case "AutomationWebhookPayloadTooLargeError":
+      return 413;
+    default:
+      return 500;
+  }
+}
+
 /** The webhook trigger surface: fire saved tasks or run ad-hoc prompts by API key. */
 export const automationWebhookHttpApiLayer = HttpApiBuilder.group(
   EnvironmentHttpApi,
@@ -151,78 +176,138 @@ export const automationWebhookHttpApiLayer = HttpApiBuilder.group(
     const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
     const projects = yield* ProjectService.ProjectService;
     const crypto = yield* Crypto.Crypto;
+    const serverSettings = yield* ServerSettings.ServerSettingsService;
+    const events = yield* AutomationEventLog.AutomationEventLog;
 
     return handlers.handle(
       "trigger",
       Effect.fn("environment.automations.trigger")(function* (args) {
         yield* annotateEnvironmentRequest(args.endpoint.name);
-        yield* requireEnvironmentScope("automation:trigger");
+        const principal = yield* requireEnvironmentScope("automation:trigger");
+        const settings = yield* serverSettings.getSettings.pipe(
+          Effect.catch(() => failEnvironmentInternal("internal_error")),
+        );
+        // Disabled answers 404 like an unknown route: the machine has not
+        // opted in to machine-to-machine automation, and its existence is not
+        // advertised. Disabled deliveries are not logged — the endpoint is
+        // effectively not there.
+        if (!settings.enableAutomationWebhook) {
+          return yield* new AutomationWebhookNotFoundError({
+            code: "not_found",
+            message: "Automation webhook is not enabled on this machine.",
+          });
+        }
         const request = args.payload;
+        const eventJson =
+          request.event === undefined
+            ? undefined
+            : yield* encodeEventJson(request.event).pipe(
+                Effect.catch(() => failEnvironmentInternal("internal_error")),
+              );
 
         const requested = planAutomationWebhookRequest(request);
-        if (!requested.ok) return yield* requested.error;
-        const plan = requested.plan;
+        const plan = requested.ok ? requested.plan : null;
+        const deliveryBase = {
+          ...(request.fireKey === undefined ? {} : { fireKey: request.fireKey }),
+          ...(eventJson === undefined ? {} : { eventJson }),
+          keySubject: principal.subject,
+          keySessionId: principal.sessionId,
+        };
 
-        // Saved-task mode.
-        if (plan.mode === "task") {
-          const fired = yield* scheduledTasks
-            .fireTask({
-              taskId: plan.taskId,
-              ...(request.event === undefined ? {} : { event: request.event }),
-              ...(request.fireKey === undefined ? {} : { fireKey: request.fireKey }),
+        const dispatch = Effect.gen(function* () {
+          if (!requested.ok) return yield* requested.error;
+
+          // Saved-task mode.
+          if (requested.plan.mode === "task") {
+            const fired = yield* scheduledTasks
+              .fireTask({
+                taskId: requested.plan.taskId,
+                ...(request.event === undefined ? {} : { event: request.event }),
+                ...(request.fireKey === undefined ? {} : { fireKey: request.fireKey }),
+              })
+              .pipe(
+                Effect.mapError(mapScheduledTaskError),
+                Effect.catchTag("ScheduledTaskError", (error) =>
+                  failEnvironmentInternal("internal_error", error),
+                ),
+              );
+            return { threadId: fired.threadId, taskId: fired.task.id };
+          }
+
+          // Ad-hoc prompt mode: launch a fresh thread in the designated project,
+          // inheriting that project's model and the server's default runtime.
+          const projectId = requested.plan.projectId;
+          const project = yield* projects.getById(projectId).pipe(
+            Effect.flatMap(
+              Option.match({
+                onNone: () =>
+                  new AutomationWebhookNotFoundError({
+                    code: "not_found",
+                    message: "Project not found.",
+                  }),
+                onSome: Effect.succeed,
+              }),
+            ),
+            Effect.catchTag("ProjectOperationError", (error) =>
+              failEnvironmentInternal("internal_error", error),
+            ),
+          );
+          const fireKey =
+            request.fireKey ??
+            `webhook:${yield* crypto.randomUUIDv4.pipe(Effect.catch(() => failEnvironmentInternal("internal_error")))}`;
+          const launched = yield* threadLaunch
+            .launch({
+              commandId: CommandId.make(`webhook-run:${fireKey}`),
+              projectId,
+              title: request.title ?? "Webhook run",
+              modelSelection:
+                project.defaultModelSelection ?? getAutoBootstrapDefaultModelSelection(),
+              runtimeMode: DEFAULT_RUNTIME_MODE,
+              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+              workspaceStrategy: { type: "root" },
+              initialMessage: {
+                messageId: MessageId.make(`webhook-run-message:${fireKey}`),
+                text: withEventBlock(requested.plan.prompt, request.event),
+                attachments: [],
+              },
+              createdBy: "system",
+              creationSource: "server",
             })
-            .pipe(
-              Effect.mapError(mapScheduledTaskError),
-              Effect.catchTag("ScheduledTaskError", (error) =>
-                failEnvironmentInternal("internal_error", error),
-              ),
-            );
-          return { threadId: fired.threadId, taskId: fired.task.id };
-        }
+            .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+          return { threadId: ThreadId.make(launched.threadId) };
+        });
 
-        // Ad-hoc prompt mode: launch a fresh thread in the designated project,
-        // inheriting that project's model and the server's default runtime.
-        const projectId = plan.projectId;
-        const project = yield* projects.getById(projectId).pipe(
-          Effect.flatMap(
-            Option.match({
-              onNone: () =>
-                new AutomationWebhookNotFoundError({
-                  code: "not_found",
-                  message: "Project not found.",
-                }),
-              onSome: Effect.succeed,
+        return yield* dispatch.pipe(
+          // The delivery log is observability, not a gate: record both
+          // outcomes best-effort and let the trigger response stand on its own.
+          Effect.tap((result) =>
+            events.record({
+              outcome: "accepted",
+              httpStatus: 202,
+              ...(plan?.mode === "task"
+                ? { mode: plan.mode, taskId: plan.taskId }
+                : plan?.mode === "adhoc"
+                  ? { mode: plan.mode, projectId: plan.projectId }
+                  : {}),
+              threadId: result.threadId,
+              ...deliveryBase,
             }),
           ),
-          Effect.catchTag("ProjectOperationError", (error) =>
-            failEnvironmentInternal("internal_error", error),
+          Effect.tapError((error) =>
+            events.record({
+              outcome: "rejected",
+              httpStatus: httpStatusForError(error),
+              ...(plan?.mode === "task"
+                ? { mode: plan.mode, taskId: plan.taskId }
+                : plan?.mode === "adhoc"
+                  ? { mode: plan.mode, projectId: plan.projectId }
+                  : {}),
+              errorCode: error._tag,
+              errorMessage: error.message,
+              ...deliveryBase,
+            }),
           ),
         );
-        const fireKey =
-          request.fireKey ??
-          `webhook:${yield* crypto.randomUUIDv4.pipe(Effect.catch(() => failEnvironmentInternal("internal_error")))}`;
-        const launched = yield* threadLaunch
-          .launch({
-            commandId: CommandId.make(`webhook-run:${fireKey}`),
-            projectId,
-            title: request.title ?? "Webhook run",
-            modelSelection:
-              project.defaultModelSelection ?? getAutoBootstrapDefaultModelSelection(),
-            runtimeMode: DEFAULT_RUNTIME_MODE,
-            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-            workspaceStrategy: { type: "root" },
-            initialMessage: {
-              messageId: MessageId.make(`webhook-run-message:${fireKey}`),
-              text: withEventBlock(plan.prompt, request.event),
-              attachments: [],
-            },
-            createdBy: "system",
-            creationSource: "server",
-          })
-          .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
-        return AutomationWebhookTriggerResult.make({
-          threadId: ThreadId.make(launched.threadId),
-        });
       }),
     );
   }),

@@ -45,6 +45,7 @@ import { layer as threadLifecycleServiceLayer } from "./ThreadLifecycleService.t
 import { layer as threadForkServiceLayer } from "./ThreadForkService.ts";
 import { layer as turnItemPositionStoreLayer } from "./TurnItemPositionStore.ts";
 import { layer as scheduledTaskServiceLayer } from "../scheduledTasks/ScheduledTaskService.ts";
+import { layer as automationEventLogLayer } from "../scheduledTasks/AutomationEventLog.ts";
 
 export const ProjectServiceLayerLive = projectServiceLayer.pipe(
   Layer.provide(Layer.merge(ProjectionProjectRepositoryLive, OrchestrationLayerLive)),
@@ -205,6 +206,9 @@ const threadLifecycleProvided = threadLifecycleServiceLayer.pipe(
 const scheduledTaskProvided = scheduledTaskServiceLayer.pipe(
   Layer.provide(Layer.mergeAll(threadLaunchProvided, threadManagementProvided)),
 );
+const automationEventLogProvided = automationEventLogLayer.pipe(
+  Layer.provide(Layer.mergeAll(threadLaunchProvided, threadManagementProvided)),
+);
 const providerContinuationWorkerProvided = providerContinuationWorkerLive.pipe(
   Layer.provide(
     Layer.mergeAll(providerContinuationRequestsLayer, threadManagementProvided, idAllocatorLayer),
@@ -260,5 +264,6 @@ export const OrchestrationV2ProductionLayerLive = Layer.mergeAll(
   threadLaunchProvided,
   threadLifecycleProvided,
   scheduledTaskProvided,
+  automationEventLogProvided,
   providerContinuationWorkerProvided,
 );

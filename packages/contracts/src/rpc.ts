@@ -204,6 +204,11 @@ import {
 import { UsageReadError, UsageSummary, UsageSummaryInput } from "./usage.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
+  AutomationEventError,
+  AutomationEventListInput,
+  AutomationEventListResult,
+} from "./automationWebhook.ts";
+import {
   ScheduledTaskDeleteInput,
   ScheduledTaskDeleteResult,
   ScheduledTaskError,
@@ -318,6 +323,8 @@ export const WS_METHODS = {
 
   // Scheduled tasks
   scheduledTasksList: "scheduledTasks.list",
+  automationEventsList: "automationEvents.list",
+  automationEventsSubscribe: "automationEvents.subscribe",
   scheduledTasksSubscribe: "scheduledTasks.subscribe",
   scheduledTasksUpsert: "scheduledTasks.upsert",
   scheduledTasksSetEnabled: "scheduledTasks.setEnabled",
@@ -1109,6 +1116,20 @@ export const WsScheduledTasksRunNowRpc = Rpc.make(WS_METHODS.scheduledTasksRunNo
   error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
 });
 
+export const WsAutomationEventsListRpc = Rpc.make(WS_METHODS.automationEventsList, {
+  payload: AutomationEventListInput,
+  success: AutomationEventListResult,
+  error: Schema.Union([AutomationEventError, EnvironmentAuthorizationError]),
+});
+
+/** Streams the delivery log: snapshot on subscribe, fresh list after every recorded delivery. */
+export const WsAutomationEventsSubscribeRpc = Rpc.make(WS_METHODS.automationEventsSubscribe, {
+  payload: AutomationEventListInput,
+  success: AutomationEventListResult,
+  error: Schema.Union([AutomationEventError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
 export const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
   payload: Schema.Struct({}),
   success: AuthAccessStreamEvent,
@@ -1151,6 +1172,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerSignalProcessRpc,
   WsScheduledTasksListRpc,
   WsScheduledTasksSubscribeRpc,
+  WsAutomationEventsListRpc,
+  WsAutomationEventsSubscribeRpc,
   WsScheduledTasksUpsertRpc,
   WsScheduledTasksSetEnabledRpc,
   WsScheduledTasksDeleteRpc,

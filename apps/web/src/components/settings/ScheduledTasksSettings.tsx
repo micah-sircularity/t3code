@@ -54,7 +54,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { SettingsPageContainer, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
 
-type ScheduleMode = "fixed" | "interval" | "webhook";
+type ScheduleMode = "fixed" | "interval";
 type WorkspaceMode = "root" | "worktree" | "existing_worktree";
 
 interface DraftState {
@@ -161,9 +161,6 @@ function scheduleFromDraft(draft: DraftState): ScheduledTaskSchedule {
     const minutes = Math.max(1, Number.parseInt(draft.intervalMinutes, 10) || 1);
     return { type: "interval", everyMs: minutes * 60_000 };
   }
-  if (draft.scheduleMode === "webhook") {
-    return { type: "webhook" };
-  }
   const selectedEveryDay = draft.weekdays.size === 0 || draft.weekdays.size === 7;
   return {
     type: "fixed_time",
@@ -224,8 +221,7 @@ function taskToDraft(task: ScheduledTask): DraftState {
     title: task.title,
     prompt: task.prompt,
     enabled: task.enabled,
-    scheduleMode:
-      schedule.type === "interval" ? "interval" : schedule.type === "webhook" ? "webhook" : "fixed",
+    scheduleMode: schedule.type === "interval" ? "interval" : "fixed",
     intervalMinutes:
       schedule.type === "interval"
         ? String(Math.max(1, Math.round(schedule.everyMs / 60_000)))
@@ -440,8 +436,7 @@ export function ScheduledTasksSettings() {
             <div className="space-y-1">
               <p className="text-sm font-medium text-foreground">No schedule tasks yet</p>
               <p className="mx-auto max-w-xs text-xs text-muted-foreground">
-                Create one to run a prompt automatically — on a schedule, at a fixed time, or when a
-                webhook triggers it.
+                Create one to run a prompt on a schedule — on an interval or at a fixed time.
               </p>
             </div>
             <Button size="sm" onClick={openForCreate}>
@@ -464,11 +459,7 @@ export function ScheduledTasksSettings() {
                   <p className="line-clamp-2 text-xs text-muted-foreground">{task.prompt}</p>
                   <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground/80">
                     <span>{scheduleLabel(task.schedule)}</span>
-                    <span>
-                      {task.schedule.type === "webhook"
-                        ? "Waiting for event"
-                        : `Next: ${relativeLabel(task.nextRunAt)}`}
-                    </span>
+                    <span>Next: {relativeLabel(task.nextRunAt)}</span>
                     <span>Runs: {task.runCount}</span>
                   </div>
                   {task.lastRunError ? (
@@ -637,7 +628,6 @@ export function ScheduledTasksSettings() {
                     [
                       ["fixed", "Daily"],
                       ["interval", "Interval"],
-                      ["webhook", "Webhook"],
                     ] as const
                   ).map(([mode, label]) => (
                     <button
@@ -658,37 +648,7 @@ export function ScheduledTasksSettings() {
                 </div>
               </div>
 
-              {draft.scheduleMode === "webhook" ? (
-                <div className="space-y-2 rounded-lg border border-border/70 bg-muted/30 px-3 py-2.5 text-xs text-muted-foreground">
-                  <p>
-                    This task runs when the automation webhook receives a request for it — it never
-                    fires on a clock. Trigger it with a{" "}
-                    <code className="rounded bg-background px-1 py-0.5 text-[11px]">POST</code> to{" "}
-                    <code className="rounded bg-background px-1 py-0.5 text-[11px]">
-                      /api/automations/trigger
-                    </code>{" "}
-                    carrying{" "}
-                    <code className="rounded bg-background px-1 py-0.5 text-[11px]">
-                      {"{ taskId, event }"}
-                    </code>
-                    , authenticated with an API key issued by{" "}
-                    <code className="rounded bg-background px-1 py-0.5 text-[11px]">
-                      t3 auth session issue --scope automation:trigger
-                    </code>
-                    .
-                  </p>
-                  {draft.editingId ? (
-                    <p>
-                      <span className="text-[11px]">This task's ID:</span>{" "}
-                      <code className="select-all rounded bg-background px-1 py-0.5 text-[11px] text-foreground">
-                        {draft.editingId}
-                      </code>
-                    </p>
-                  ) : (
-                    <p className="text-[11px]">Save the task to see its ID.</p>
-                  )}
-                </div>
-              ) : draft.scheduleMode === "fixed" ? (
+              {draft.scheduleMode === "fixed" ? (
                 <div className="flex flex-wrap items-center gap-3">
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-muted-foreground">Run at</span>
