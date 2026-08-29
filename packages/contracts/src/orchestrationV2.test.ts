@@ -253,6 +253,7 @@ describe("orchestration V2 contracts", () => {
       parentRunId: "run-parent-1",
       parentNodeId: "node-parent-1",
       targetThreadId: "thread-child-1",
+      targetProjectId: "project-child-1",
       targetRunId: "run-child-1",
     });
     const item = decodeOrchestrationV2TurnItem({
@@ -269,6 +270,7 @@ describe("orchestration V2 contracts", () => {
       status: "completed",
       title: "Child thread",
       targetThreadId: "thread-child-1",
+      targetProjectId: "project-child-1",
       targetRunId: "run-child-1",
       targetProviderInstanceId: "claude-default",
       targetModel: "claude-sonnet-4-6",
@@ -282,11 +284,13 @@ describe("orchestration V2 contracts", () => {
       throw new Error("expected thread.created.record");
     }
     expect(command.targetThreadId).toBe(ThreadId.make("thread-child-1"));
+    expect(command.targetProjectId).toBe(ProjectId.make("project-child-1"));
     expect(item.type).toBe("thread_created");
     if (item.type !== "thread_created") {
       throw new Error("expected thread_created");
     }
     expect(item.targetRunId).toBe(RunId.make("run-child-1"));
+    expect(item.targetProjectId).toBe(ProjectId.make("project-child-1"));
   });
 
   it("decodes provider-neutral replay transcripts", () => {

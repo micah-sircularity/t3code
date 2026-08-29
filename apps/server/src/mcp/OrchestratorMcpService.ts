@@ -45,6 +45,8 @@ import {
   type ProviderInteractionMode,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
+  type Project,
+  type ProjectId,
   type RuntimeMode,
   type ScheduledTask,
   type ScheduledTaskUpsertInput,
@@ -56,12 +58,15 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { isBuiltInProviderAdapterDriverV2 } from "../orchestration-v2/builtInProviderAdapterDrivers.ts";
 import { subagentResultForRun } from "../orchestration-v2/SubagentProjection.ts";
+import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import {
   isActiveRun,
   latestActiveRun,
@@ -70,7 +75,9 @@ import {
   ThreadManagementService,
 } from "../orchestration-v2/ThreadManagementService.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts";
+import { VcsDriverRegistry, type VcsDriverHandle } from "../vcs/VcsDriverRegistry.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -672,7 +679,12 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const threadManagement = yield* ThreadManagementService;
   const providerRegistry = yield* ProviderRegistry;
+  const projects = yield* ProjectService.ProjectService;
   const scheduledTasks = yield* ScheduledTaskService;
+  const threadLaunch = yield* ThreadLaunch.ThreadLaunchService;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const vcsRegistry = yield* VcsDriverRegistry;
 
   const requireCapability = (scope: McpInvocationScope) =>
     scope.capabilities.has("orchestration")
@@ -704,16 +716,219 @@ const make = Effect.gen(function* () {
       .getProjectThread({ projectId, threadId })
       .pipe(Effect.mapError(threadManagementFailure));
 
-  const loadScopedThread = (scope: McpInvocationScope, threadId: ThreadId) =>
+  const resolveProjectId = (
+    parent: OrchestrationV2ThreadProjection,
+    requestedProjectId: ProjectId | undefined,
+  ): Effect.Effect<ProjectId, OrchestratorMcpFailure> =>
+    Effect.gen(function* () {
+      const projectId = requestedProjectId ?? parent.thread.projectId;
+      if (projectId === parent.thread.projectId) return projectId;
+      const project = yield* projects
+        .getById(projectId)
+        .pipe(
+          Effect.mapError((error) =>
+            failure(
+              "orchestration_error",
+              `Unable to read project ${projectId}: ${errorMessage(error)}`,
+            ),
+          ),
+        );
+      if (Option.isNone(project)) {
+        return yield* failure("project_not_found", `Project ${projectId} was not found.`);
+      }
+      return projectId;
+    });
+
+  const loadLaunchProject = (projectId: ProjectId) =>
+    projects.getById(projectId).pipe(
+      Effect.mapError((error) =>
+        failure(
+          "orchestration_error",
+          `Unable to read project ${projectId}: ${errorMessage(error)}`,
+        ),
+      ),
+      Effect.flatMap(
+        Option.match({
+          onNone: () =>
+            Effect.fail(failure("project_not_found", `Project ${projectId} was not found.`)),
+          onSome: Effect.succeed,
+        }),
+      ),
+    );
+
+  const loadScopedThread = (
+    scope: McpInvocationScope,
+    threadId: ThreadId,
+    requestedProjectId?: ProjectId,
+  ) =>
     Effect.gen(function* () {
       yield* requireCapability(scope);
       const parent = yield* loadProjection(scope.threadId);
+      const projectId = yield* resolveProjectId(parent, requestedProjectId);
       const target =
-        threadId === scope.threadId
+        threadId === scope.threadId && projectId === parent.thread.projectId
           ? parent
-          : yield* loadProjectThread(parent.thread.projectId, threadId);
-      return { parent, target } as const;
+          : yield* loadProjectThread(projectId, threadId);
+      return { parent, projectId, target } as const;
     });
+
+  const canonicalPath = (value: string, label: string) =>
+    fileSystem
+      .realPath(value)
+      .pipe(
+        Effect.mapError((error) =>
+          failure("invalid_request", `Unable to resolve ${label}: ${errorMessage(error)}`),
+        ),
+      );
+
+  const detectRepository = (cwd: string, label: string) =>
+    vcsRegistry
+      .detect({ cwd })
+      .pipe(
+        Effect.mapError((error) =>
+          failure("invalid_request", `Unable to inspect ${label}: ${errorMessage(error)}`),
+        ),
+      );
+
+  const canonicalRepositoryMetadata = Effect.fn(
+    "OrchestratorMcpService.canonicalRepositoryMetadata",
+  )(function* (input: { readonly rootPath: string; readonly metadataPath: string | null }) {
+    if (input.metadataPath === null) return null;
+    return yield* canonicalPath(
+      path.isAbsolute(input.metadataPath)
+        ? input.metadataPath
+        : path.resolve(input.rootPath, input.metadataPath),
+      "repository metadata",
+    );
+  });
+
+  const actualGitBranch = Effect.fn("OrchestratorMcpService.actualGitBranch")(function* (
+    handle: VcsDriverHandle,
+    cwd: string,
+  ) {
+    const result = yield* handle.driver
+      .execute({
+        operation: "OrchestratorMcpService.actualGitBranch",
+        cwd,
+        args: ["symbolic-ref", "--quiet", "--short", "HEAD"],
+        allowNonZeroExit: true,
+        timeoutMs: 5_000,
+        maxOutputBytes: 16 * 1024,
+      })
+      .pipe(
+        Effect.mapError((error) =>
+          failure("invalid_request", `Unable to read the workspace branch: ${errorMessage(error)}`),
+        ),
+      );
+    const branch = result.exitCode === 0 ? result.stdout.trim() : "";
+    return branch.length === 0 ? null : branch;
+  });
+
+  const inspectLaunchWorkspace = Effect.fn("OrchestratorMcpService.inspectLaunchWorkspace")(
+    function* (project: Project, candidatePath: string, requireLinkedWorktree: boolean) {
+      const projectRepository = yield* detectRepository(project.workspaceRoot, "project root");
+      if (projectRepository === null) {
+        if (requireLinkedWorktree) {
+          return yield* failure(
+            "invalid_request",
+            `Project ${project.id} does not have a repository with linked worktrees.`,
+          );
+        }
+        return { canonicalPath: project.workspaceRoot, branch: null } as const;
+      }
+      if (projectRepository.kind !== "git") {
+        return yield* failure(
+          "invalid_request",
+          `Project ${project.id} uses ${projectRepository.kind}; this launch strategy requires Git.`,
+        );
+      }
+
+      const candidateRepository = yield* detectRepository(candidatePath, "workspace path");
+      if (candidateRepository === null || candidateRepository.kind !== "git") {
+        return yield* failure(
+          "invalid_request",
+          `Workspace path '${candidatePath}' is not a Git workspace for project ${project.id}.`,
+        );
+      }
+      const [canonicalCandidate, canonicalCandidateRoot, projectMetadata, candidateMetadata] =
+        yield* Effect.all([
+          canonicalPath(candidatePath, "workspace path"),
+          canonicalPath(candidateRepository.repository.rootPath, "workspace root"),
+          canonicalRepositoryMetadata(projectRepository.repository),
+          canonicalRepositoryMetadata(candidateRepository.repository),
+        ]);
+      if (
+        canonicalCandidate !== canonicalCandidateRoot ||
+        projectMetadata === null ||
+        candidateMetadata === null ||
+        projectMetadata !== candidateMetadata
+      ) {
+        return yield* failure(
+          "invalid_request",
+          `Workspace path '${candidatePath}' is not a workspace of project ${project.id}.`,
+        );
+      }
+      return {
+        canonicalPath: canonicalCandidate,
+        branch: yield* actualGitBranch(candidateRepository, canonicalCandidate),
+      } as const;
+    },
+  );
+
+  const enforceExpectedBranch = (
+    expected: string | undefined,
+    actual: string | null,
+    cwd: string,
+  ): Effect.Effect<void, OrchestratorMcpFailure> =>
+    expected === undefined || expected === actual
+      ? Effect.void
+      : Effect.fail(
+          failure(
+            "invalid_request",
+            `Workspace '${cwd}' is on ${actual === null ? "a detached HEAD" : `branch '${actual}'`}, not requested branch '${expected}'.`,
+          ),
+        );
+
+  const resolveLaunchWorkspace = Effect.fn("OrchestratorMcpService.resolveLaunchWorkspace")(
+    function* (
+      parent: OrchestrationV2ThreadProjection,
+      project: Project,
+      requested: OrchestratorMcpCreateThreadsInput["threads"][number]["workspaceStrategy"],
+    ): Effect.fn.Return<ThreadLaunch.ThreadLaunchWorkspaceStrategy, OrchestratorMcpFailure> {
+      if (requested?.type === "new_worktree") {
+        return {
+          type: "worktree",
+          baseRef: requested.baseRef,
+          ...(requested.branch === undefined ? {} : { branch: requested.branch }),
+          ...(requested.startFromOrigin === undefined
+            ? {}
+            : { startFromOrigin: requested.startFromOrigin }),
+        };
+      }
+      const explicitExisting = requested?.type === "existing_worktree" ? requested : undefined;
+      const useParentWorktree =
+        requested === undefined &&
+        project.id === parent.thread.projectId &&
+        parent.thread.worktreePath !== null;
+      if (explicitExisting !== undefined || useParentWorktree) {
+        const requestedPath = explicitExisting?.worktreePath ?? parent.thread.worktreePath!;
+        const workspace = yield* inspectLaunchWorkspace(project, requestedPath, true);
+        yield* enforceExpectedBranch(explicitExisting?.branch, workspace.branch, requestedPath);
+        return {
+          type: "existing_worktree",
+          worktreePath: workspace.canonicalPath,
+          ...(workspace.branch === null ? {} : { branch: workspace.branch }),
+        };
+      }
+      const workspace = yield* inspectLaunchWorkspace(project, project.workspaceRoot, false);
+      const expectedBranch = requested?.type === "root" ? requested.branch : undefined;
+      yield* enforceExpectedBranch(expectedBranch, workspace.branch, project.workspaceRoot);
+      return {
+        type: "root",
+        ...(workspace.branch === null ? {} : { branch: workspace.branch }),
+      };
+    },
+  );
 
   const loadProviders = providerRegistry.getProviders;
 
@@ -1114,6 +1329,13 @@ const make = Effect.gen(function* () {
             incrementalThreadRead: true,
             scheduledTasks: true,
             maxBatchThreads: 20,
+            projectManagement: true,
+            projectTargeting: true,
+            threadLaunchWorkspaceStrategies: [
+              "root" as const,
+              "existing_worktree" as const,
+              "new_worktree" as const,
+            ],
           },
         };
       }),
@@ -1359,6 +1581,13 @@ const make = Effect.gen(function* () {
                 parent.thread.interactionMode,
                 request.interactionMode,
               );
+              const projectId = yield* resolveProjectId(parent, request.projectId);
+              const project = yield* loadLaunchProject(projectId);
+              const workspaceStrategy = yield* resolveLaunchWorkspace(
+                parent,
+                project,
+                request.workspaceStrategy,
+              );
               const threadId = stableThreadId({
                 scope,
                 requestKey: key,
@@ -1370,11 +1599,8 @@ const make = Effect.gen(function* () {
                 title: request.title,
                 index,
               });
-              yield* threadManagement
-                .dispatch({
-                  type: "thread.create",
-                  createdBy: "agent",
-                  creationSource: "mcp",
+              const launched = yield* threadLaunch
+                .launch({
                   commandId: stableCommandId({
                     scope,
                     requestKey: key,
@@ -1382,55 +1608,33 @@ const make = Effect.gen(function* () {
                     index,
                   }),
                   threadId,
-                  projectId: parent.thread.projectId,
+                  projectId,
                   title,
                   modelSelection: target.modelSelection,
                   runtimeMode,
                   interactionMode,
-                  branch: parent.thread.branch,
-                  worktreePath: parent.thread.worktreePath,
+                  workspaceStrategy,
+                  ...(request.prompt === undefined
+                    ? {}
+                    : {
+                        initialMessage: {
+                          messageId: stableMessageId({ scope, requestKey: key, index }),
+                          text: request.prompt,
+                          attachments: [],
+                        },
+                      }),
+                  createdBy: "agent",
+                  creationSource: "mcp",
                 })
                 .pipe(
                   Effect.mapError((error) =>
                     failure(
                       "orchestration_error",
-                      `Unable to create thread ${index + 1}: ${errorMessage(error)}`,
+                      `Unable to launch thread ${index + 1}: ${errorMessage(error)}`,
                     ),
                   ),
                 );
-              if (request.prompt !== undefined) {
-                yield* threadManagement
-                  .dispatch({
-                    type: "message.dispatch",
-                    createdBy: "agent",
-                    creationSource: "mcp",
-                    commandId: stableCommandId({
-                      scope,
-                      requestKey: key,
-                      operation: "dispatch-thread",
-                      index,
-                    }),
-                    threadId,
-                    messageId: stableMessageId({
-                      scope,
-                      requestKey: key,
-                      index,
-                    }),
-                    text: request.prompt,
-                    attachments: [],
-                    modelSelection: target.modelSelection,
-                    dispatchMode: { type: "start_immediately" },
-                  })
-                  .pipe(
-                    Effect.mapError((error) =>
-                      failure(
-                        "orchestration_error",
-                        `Unable to start thread ${index + 1}: ${errorMessage(error)}`,
-                      ),
-                    ),
-                  );
-              }
-              const projection = yield* loadProjection(threadId);
+              const projection = launched.projection;
               const run = projection.runs.at(-1);
               yield* threadManagement
                 .dispatch({
@@ -1445,6 +1649,7 @@ const make = Effect.gen(function* () {
                   parentRunId: parentRun.id,
                   parentNodeId,
                   targetThreadId: threadId,
+                  targetProjectId: projectId,
                   targetRunId: run?.id ?? null,
                 })
                 .pipe(
@@ -1457,6 +1662,7 @@ const make = Effect.gen(function* () {
                 );
               return {
                 threadId,
+                projectId,
                 runId: run?.id ?? null,
                 status: run?.status ?? "idle",
                 title: projection.thread.title,
@@ -1474,9 +1680,10 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* requireCapability(scope);
         const parent = yield* loadProjection(scope.threadId);
+        const projectId = yield* resolveProjectId(parent, input.projectId);
         const projectThreads = yield* threadManagement
           .listProjectThreads({
-            projectId: parent.thread.projectId,
+            projectId,
             includeSubagents: input.includeSubagents !== false,
           })
           .pipe(
@@ -1501,7 +1708,7 @@ const make = Effect.gen(function* () {
         const page = filtered.slice(cursor, cursor + limit);
         const nextCursor = cursor + page.length < filtered.length ? cursor + page.length : null;
         return {
-          projectId: parent.thread.projectId,
+          projectId,
           currentThreadId: scope.threadId,
           threads: page.map(listItemFromShell),
           nextCursor,
@@ -1510,7 +1717,7 @@ const make = Effect.gen(function* () {
       }),
     readThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent, target } = yield* loadScopedThread(scope, input.threadId);
+        const { parent, target } = yield* loadScopedThread(scope, input.threadId, input.projectId);
         const view = input.view ?? "messages";
         const afterPosition = input.afterPosition ?? -1;
         const limit = input.limit ?? DEFAULT_THREAD_READ_LIMIT;
@@ -1566,7 +1773,11 @@ const make = Effect.gen(function* () {
       }),
     sendToThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent, target } = yield* loadScopedThread(scope, input.threadId);
+        const { parent, projectId, target } = yield* loadScopedThread(
+          scope,
+          input.threadId,
+          input.projectId,
+        );
         yield* resolveRuntimeMode(parent.thread.runtimeMode, target.thread.runtimeMode);
         yield* resolveInteractionMode(parent.thread.interactionMode, target.thread.interactionMode);
 
@@ -1579,7 +1790,7 @@ const make = Effect.gen(function* () {
         });
         const result = yield* threadManagement
           .sendToThread({
-            projectId: parent.thread.projectId,
+            projectId,
             commandId: stableCommandId({
               scope,
               requestKey: key,
@@ -1613,10 +1824,10 @@ const make = Effect.gen(function* () {
       }),
     waitForThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent } = yield* loadScopedThread(scope, input.threadId);
+        const { projectId } = yield* loadScopedThread(scope, input.threadId, input.projectId);
         const result = yield* threadManagement
           .waitForThread({
-            projectId: parent.thread.projectId,
+            projectId,
             threadId: input.threadId,
             ...(input.runId === undefined ? {} : { runId: input.runId }),
             timeoutMs: Math.min(
@@ -1634,11 +1845,11 @@ const make = Effect.gen(function* () {
       }),
     interruptThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent } = yield* loadScopedThread(scope, input.threadId);
+        const { projectId } = yield* loadScopedThread(scope, input.threadId, input.projectId);
         const key = yield* requestKey(input.clientRequestId);
         const result = yield* threadManagement
           .interruptThread({
-            projectId: parent.thread.projectId,
+            projectId,
             commandId: stableCommandId({
               scope,
               requestKey: key,
@@ -1677,5 +1888,13 @@ const make = Effect.gen(function* () {
 export const layer: Layer.Layer<
   OrchestratorMcpService,
   never,
-  Crypto.Crypto | ThreadManagementService | ProviderRegistry | ScheduledTaskService
+  | Crypto.Crypto
+  | FileSystem.FileSystem
+  | Path.Path
+  | ThreadManagementService
+  | ProviderRegistry
+  | ProjectService.ProjectService
+  | ScheduledTaskService
+  | ThreadLaunch.ThreadLaunchService
+  | VcsDriverRegistry
 > = Layer.effect(OrchestratorMcpService, make);

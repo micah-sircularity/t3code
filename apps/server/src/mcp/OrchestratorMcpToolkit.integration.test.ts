@@ -36,6 +36,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -44,7 +45,10 @@ import { McpSchema, McpServer } from "effect/unstable/ai";
 
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
+import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
 import { OrchestratorV2, type OrchestratorV2Shape } from "../orchestration-v2/Orchestrator.ts";
+import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import { layer as threadManagementServiceLayer } from "../orchestration-v2/ThreadManagementService.ts";
 import {
   type ProviderAdapterV2Event,
@@ -59,13 +63,22 @@ import {
 } from "../orchestration-v2/ProviderContinuationRequests.ts";
 import { checkpointWorkspace } from "../orchestration-v2/testkit/ReplayFixtureWorkspace.ts";
 import { makeOrchestratorV2ReplayLayerWithRegistry } from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
+import * as GitWorkflow from "../git/GitWorkflowService.ts";
+import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
+import * as ProjectService from "../project/ProjectService.ts";
+import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as TextGeneration from "../textGeneration/TextGeneration.ts";
+import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 
 const parentThreadId = ThreadId.make("thread:mcp-orchestrator-parent");
 const projectId = ProjectId.make("project:mcp-orchestrator");
+const targetProjectId = ProjectId.make("project:mcp-orchestrator-target");
 const codexInstanceId = ProviderInstanceId.make("codex");
 const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
 const codexModel = "gpt-5.4";
@@ -429,6 +442,7 @@ describe("orchestrator MCP toolkit", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const cwd = yield* checkpointWorkspace("orchestrator-mcp-toolkit");
+          const targetWorkspace = yield* checkpointWorkspace("orchestrator-mcp-target");
           const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
           const parentTerminalGates = new Map<ThreadId, Deferred.Deferred<void>>();
           const deliveryTerminalGates = new Map<ThreadId, Deferred.Deferred<void>>();
@@ -496,6 +510,7 @@ describe("orchestrator MCP toolkit", () => {
                 expect(yield* Ref.get(continuationOffers)).toHaveLength(count);
               }
             });
+          const databaseLayer = SqlitePersistenceMemory;
           const orchestratorLayer = makeOrchestratorV2ReplayLayerWithRegistry(
             {
               name: "orchestrator-mcp-toolkit",
@@ -510,6 +525,7 @@ describe("orchestrator MCP toolkit", () => {
               },
             },
             registryLayer,
+            { databaseLayer },
           ).pipe(Layer.provide(continuationProbeLayer));
           const orchestrationLayer = Layer.merge(
             orchestratorLayer,
@@ -544,6 +560,27 @@ describe("orchestrator MCP toolkit", () => {
               model: "opencode/test",
             }),
           ]);
+          const projectLayer = Layer.mock(ProjectService.ProjectService)({
+            getById: (requestedProjectId) =>
+              Effect.succeed(
+                requestedProjectId === projectId || requestedProjectId === targetProjectId
+                  ? Option.some({
+                      id: requestedProjectId,
+                      title:
+                        requestedProjectId === projectId ? "MCP project" : "MCP target project",
+                      workspaceRoot: requestedProjectId === projectId ? cwd : targetWorkspace,
+                      repositoryIdentity: null,
+                      faviconPath: null,
+                      defaultModelSelection: codexSelection,
+                      defaultThreadEnvMode: "worktree",
+                      scripts: [],
+                      createdAt: "2026-08-29T12:00:00.000Z",
+                      updatedAt: "2026-08-29T12:00:00.000Z",
+                      deletedAt: null,
+                    })
+                  : Option.none(),
+              ),
+          });
           // In-memory ScheduledTaskService stub so the schedule/list/update/
           // delete tools can be exercised without SQL/launch wiring.
           const scheduledStore = yield* Ref.make<ReadonlyArray<ScheduledTask>>([]);
@@ -570,11 +607,36 @@ describe("orchestrator MCP toolkit", () => {
               runNow: () => Effect.die("ScheduledTaskService.runNow is unused in this test"),
             }),
           );
+          const receiptLayer = CommandReceiptStore.layer.pipe(Layer.provide(databaseLayer));
+          const threadLaunchLayer = ThreadLaunch.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                projectLayer,
+                Layer.mock(GitWorkflow.GitWorkflowService)({}),
+                Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
+                  runForThread: () => Effect.succeed({ status: "no-script" }),
+                }),
+                Layer.mock(TextGeneration.TextGeneration)({}),
+                ServerSettings.layerTest({}),
+                providerRegistryLayer,
+                orchestrationLayer,
+                receiptLayer,
+                IdAllocator.layer,
+              ),
+            ),
+          );
+          const vcsProcessLayer = VcsProcess.layer.pipe(Layer.provide(NodeServices.layer));
+          const vcsDriverRegistryLayer = VcsDriverRegistry.layer.pipe(
+            Layer.provide(vcsProcessLayer),
+          );
           const testLayer = McpHttpServer.OrchestratorToolkitRegistrationLive.pipe(
             Layer.provideMerge(McpServer.McpServer.layer),
             Layer.provideMerge(orchestrationLayer),
             Layer.provide(providerRegistryLayer),
             Layer.provide(scheduledTaskStubLayer),
+            Layer.provide(projectLayer),
+            Layer.provide(threadLaunchLayer),
+            Layer.provide(vcsDriverRegistryLayer),
             Layer.provide(NodeServices.layer),
           );
 
@@ -1628,6 +1690,7 @@ describe("orchestrator MCP toolkit", () => {
             expect(
               createdThreadItems.map((item) => ({
                 targetThreadId: item.targetThreadId,
+                targetProjectId: item.targetProjectId,
                 targetRunId: item.targetRunId,
                 title: item.title,
                 providerInstanceId: item.targetProviderInstanceId,
@@ -1636,6 +1699,7 @@ describe("orchestrator MCP toolkit", () => {
             ).toEqual([
               {
                 targetThreadId: emptyThread.threadId,
+                targetProjectId: projectId,
                 targetRunId: null,
                 title: emptyThread.title,
                 providerInstanceId: codexInstanceId,
@@ -1643,12 +1707,43 @@ describe("orchestrator MCP toolkit", () => {
               },
               {
                 targetThreadId: promptedThread.threadId,
+                targetProjectId: projectId,
                 targetRunId: promptedThread.runId,
                 title: promptedThread.title,
                 providerInstanceId: claudeInstanceId,
                 model: claudeModel,
               },
             ]);
+
+            const crossProjectCall = yield* invoke("create_threads", {
+              clientRequestId: "create-cross-project-thread-1",
+              threads: [{ projectId: targetProjectId, title: "Cross-project ordinary thread" }],
+            });
+            expect(crossProjectCall.isError).toBe(false);
+            const crossProjectCreated = yield* decodeCreateThreadsResult(
+              crossProjectCall.structuredContent,
+            ).pipe(Effect.orDie);
+            const crossProjectThread = crossProjectCreated.threads[0]!;
+            expect(crossProjectThread.projectId).toBe(targetProjectId);
+            expect(
+              (yield* orchestrator.getThreadProjection(crossProjectThread.threadId)).thread
+                .projectId,
+            ).toBe(targetProjectId);
+            const crossProjectItem = (yield* orchestrator.getThreadProjection(
+              parentThreadId,
+            )).visibleTurnItems
+              .map((row) => row.item)
+              .find(
+                (item) =>
+                  item.type === "thread_created" &&
+                  item.targetThreadId === crossProjectThread.threadId,
+              );
+            expect(crossProjectItem).toMatchObject({
+              type: "thread_created",
+              targetThreadId: crossProjectThread.threadId,
+              targetProjectId,
+              targetRunId: null,
+            });
 
             const repeatedCreateCall = yield* invoke("create_threads", createInput);
             const repeatedCreated = yield* decodeCreateThreadsResult(

@@ -194,6 +194,7 @@ it("identifies every existing thread that must be hydrated before dispatch", () 
       parentRunId: RunId.make("run:thread-management:parent"),
       parentNodeId: NodeId.make("node:thread-management:parent"),
       targetThreadId,
+      targetProjectId: ProjectId.make("project:thread-management:target"),
       targetRunId: null,
     }),
   ).toEqual([parentThreadId, targetThreadId]);

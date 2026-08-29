@@ -4896,11 +4896,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Parent node ${command.parentNodeId} is not the root of run ${command.parentRunId}.`,
         });
       }
-      if (parentProjection.thread.projectId !== targetProjection.thread.projectId) {
+      if (
+        command.targetProjectId === undefined &&
+        parentProjection.thread.projectId !== targetProjection.thread.projectId
+      ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause: `Target thread ${command.targetThreadId} belongs to another project.`,
+        });
+      }
+      if (
+        command.targetProjectId !== undefined &&
+        command.targetProjectId !== targetProjection.thread.projectId
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Target thread ${command.targetThreadId} does not belong to authorized project ${command.targetProjectId}.`,
         });
       }
       if (
@@ -4933,6 +4946,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         updatedAt: now,
         type: "thread_created",
         targetThreadId: command.targetThreadId,
+        targetProjectId: targetProjection.thread.projectId,
         targetRunId: command.targetRunId,
         targetProviderInstanceId: targetProjection.thread.modelSelection.instanceId,
         targetModel: targetProjection.thread.modelSelection.model,

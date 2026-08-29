@@ -112,6 +112,12 @@ describe("orchestrator MCP contracts", () => {
         {
           prompt: "Review the API.",
           target: { driverKind: "claudeAgent" },
+          projectId: "project-review",
+          workspaceStrategy: {
+            type: "new_worktree",
+            baseRef: "trunk",
+            branch: "review-api",
+          },
           runtimeMode: "approval-required",
         },
       ],
@@ -120,17 +126,25 @@ describe("orchestrator MCP contracts", () => {
     expect(request.threads).toHaveLength(2);
     expect(request.threads[0]?.prompt).toBeUndefined();
     expect(request.threads[1]?.target?.driverKind).toBe("claudeAgent");
+    expect(request.threads[1]?.workspaceStrategy).toEqual({
+      type: "new_worktree",
+      baseRef: "trunk",
+      branch: "review-api",
+    });
   });
 
   it("decodes project-scoped thread orchestration requests", () => {
     expect(
       decodeThreadStartInput({
         prompt: "Run the first loop iteration.",
+        projectId: "project-loop",
+        workspaceStrategy: { type: "root" },
         clientRequestId: "start-loop-1",
       }).prompt,
     ).toBe("Run the first loop iteration.");
     expect(
       decodeThreadListInput({
+        projectId: "project-loop",
         statuses: ["running", "completed"],
         includeSubagents: false,
         limit: 25,
@@ -139,6 +153,7 @@ describe("orchestrator MCP contracts", () => {
     expect(
       decodeThreadReadInput({
         threadId: "thread-loop-1",
+        projectId: "project-loop",
         view: "activity",
         afterPosition: 10,
       }).afterPosition,
@@ -146,6 +161,7 @@ describe("orchestrator MCP contracts", () => {
     expect(
       decodeThreadSendInput({
         threadId: "thread-loop-1",
+        projectId: "project-loop",
         message: "Continue with the next iteration.",
         mode: "steer",
         clientRequestId: "send-loop-2",
@@ -154,6 +170,7 @@ describe("orchestrator MCP contracts", () => {
     expect(
       decodeThreadWaitInput({
         threadId: "thread-loop-1",
+        projectId: "project-loop",
         runId: "run-loop-2",
         timeoutMs: 5_000,
       }).runId,
@@ -161,6 +178,7 @@ describe("orchestrator MCP contracts", () => {
     expect(
       decodeThreadInterruptInput({
         threadId: "thread-loop-1",
+        projectId: "project-loop",
         reason: "Loop converged.",
       }).reason,
     ).toBe("Loop converged.");

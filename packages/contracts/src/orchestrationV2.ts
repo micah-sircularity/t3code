@@ -1046,6 +1046,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("thread_created"),
     targetThreadId: ThreadId,
+    targetProjectId: Schema.optional(ProjectId),
     targetRunId: Schema.NullOr(RunId),
     targetProviderInstanceId: ProviderInstanceId,
     targetModel: TrimmedNonEmptyString,
@@ -1719,6 +1720,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("thread_created"),
     targetThreadId: ThreadId,
+    targetProjectId: Schema.optional(ProjectId),
     targetRunId: Schema.NullOr(RunId),
     targetProviderInstanceId: ProviderInstanceId,
     targetModel: TrimmedNonEmptyString,
@@ -2282,6 +2284,7 @@ export const OrchestrationV2Command = Schema.Union([
     parentRunId: RunId,
     parentNodeId: NodeId,
     targetThreadId: ThreadId,
+    targetProjectId: Schema.optional(ProjectId),
     targetRunId: Schema.NullOr(RunId),
   }),
   Schema.Struct({
