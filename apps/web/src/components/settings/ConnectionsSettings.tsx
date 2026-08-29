@@ -33,6 +33,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
+import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
@@ -1617,6 +1618,7 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
     operationError,
     reconcileCloudState,
   } = useCloudLinkController();
+  const { authPrompt, openAuthPrompt } = useT3ConnectAuthPrompt();
   const [isUpdating, setIsUpdating] = useState(false);
   const [isUpdatingPreference, setIsUpdatingPreference] = useState(false);
 
@@ -1677,12 +1679,18 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
           }
           status={operationError ?? primaryCloudLinkState.error}
           control={
-            <CloudLinkSwitch
-              checked={managedTunnelActive}
-              disabled={!canManageRelay || !isSignedIn || primaryCloudLinkState.isPending || isBusy}
-              disabledReason={disabledReason}
-              onCheckedChange={(enabled) => void updateManagedTunnel(enabled)}
-            />
+            !isSignedIn ? (
+              <Button size="xs" variant="outline" onClick={openAuthPrompt}>
+                Sign in
+              </Button>
+            ) : (
+              <CloudLinkSwitch
+                checked={managedTunnelActive}
+                disabled={!canManageRelay || primaryCloudLinkState.isPending || isBusy}
+                disabledReason={disabledReason}
+                onCheckedChange={(enabled) => void updateManagedTunnel(enabled)}
+              />
+            )
           }
         />
       ) : null}
@@ -1699,6 +1707,7 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
           />
         }
       />
+      {authPrompt}
     </>
   );
 }
