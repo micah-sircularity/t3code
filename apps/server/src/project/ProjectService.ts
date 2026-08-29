@@ -5,6 +5,7 @@ import {
   type Project,
   type ProjectScript,
   type ProjectSnapshot,
+  type ThreadEnvMode,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -25,6 +26,8 @@ export interface ProjectCreateInput {
   readonly workspaceRoot: string;
   readonly createWorkspaceRootIfMissing?: boolean;
   readonly defaultModelSelection?: ModelSelection | null;
+  readonly defaultThreadEnvMode?: ThreadEnvMode | null;
+  readonly faviconPath?: string | null;
   readonly scripts?: ReadonlyArray<ProjectScript>;
 }
 
@@ -34,6 +37,8 @@ export interface ProjectUpdateInput {
   readonly title?: string;
   readonly workspaceRoot?: string;
   readonly defaultModelSelection?: ModelSelection | null;
+  readonly defaultThreadEnvMode?: ThreadEnvMode | null;
+  readonly faviconPath?: string | null;
   readonly scripts?: ReadonlyArray<ProjectScript>;
 }
 
@@ -128,8 +133,9 @@ export const make = Effect.gen(function* () {
     title: row.title,
     workspaceRoot: row.workspaceRoot,
     repositoryIdentity: enrichment?.repositoryIdentity ?? null,
-    faviconPath: enrichment?.faviconPath ?? null,
+    faviconPath: row.faviconPath ?? enrichment?.faviconPath ?? null,
     defaultModelSelection: row.defaultModelSelection,
+    defaultThreadEnvMode: row.defaultThreadEnvMode,
     scripts: row.scripts,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -278,6 +284,8 @@ export const make = Effect.gen(function* () {
           title: input.title,
           workspaceRoot,
           defaultModelSelection: input.defaultModelSelection ?? null,
+          defaultThreadEnvMode: input.defaultThreadEnvMode ?? null,
+          faviconPath: input.faviconPath ?? null,
           scripts: [...(input.scripts ?? [])],
           createdAt: now,
         },
@@ -327,6 +335,10 @@ export const make = Effect.gen(function* () {
           ...(input.defaultModelSelection === undefined
             ? {}
             : { defaultModelSelection: input.defaultModelSelection }),
+          ...(input.defaultThreadEnvMode === undefined
+            ? {}
+            : { defaultThreadEnvMode: input.defaultThreadEnvMode }),
+          ...(input.faviconPath === undefined ? {} : { faviconPath: input.faviconPath }),
           ...(input.scripts === undefined ? {} : { scripts: [...input.scripts] }),
         },
         (workspaceRoot === existing.value.workspaceRoot

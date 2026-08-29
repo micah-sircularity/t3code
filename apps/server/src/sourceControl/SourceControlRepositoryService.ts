@@ -4,7 +4,9 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import {
   SourceControlRepositoryError,
@@ -18,6 +20,7 @@ import {
   type SourceControlRepositoryInfo,
   type SourceControlRepositoryLookupInput,
 } from "@t3tools/contracts";
+import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
 
 import { ServerConfig } from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -93,6 +96,22 @@ export const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const path = yield* Path.Path;
   const providers = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
+  const cloneSemaphores = yield* Ref.make(new Map<string, Semaphore.Semaphore>());
+
+  const cloneSemaphoreFor = Effect.fn("SourceControlRepositoryService.cloneSemaphoreFor")(
+    function* (destinationPath: string) {
+      const existing = (yield* Ref.get(cloneSemaphores)).get(destinationPath);
+      if (existing !== undefined) return existing;
+      const created = yield* Semaphore.make(1);
+      return yield* Ref.modify(cloneSemaphores, (current) => {
+        const raced = current.get(destinationPath);
+        if (raced !== undefined) return [raced, current] as const;
+        const next = new Map(current);
+        next.set(destinationPath, created);
+        return [created, next] as const;
+      });
+    },
+  );
 
   const ensureConcreteProvider = (input: {
     readonly operation: string;
@@ -142,8 +161,7 @@ export const make = Effect.gen(function* () {
   );
 
   const prepareDestination = Effect.fn("SourceControlRepositoryService.prepareDestination")(
-    function* (destinationPath: string) {
-      const normalizedDestination = yield* normalizeDestinationPath(destinationPath);
+    function* (normalizedDestination: string) {
       if (yield* fileSystem.exists(normalizedDestination)) {
         const entries = yield* fileSystem
           .readDirectory(normalizedDestination, { recursive: false })
@@ -158,13 +176,12 @@ export const make = Effect.gen(function* () {
                 }),
             ),
           );
-        if (entries.length > 0) {
-          return yield* new SourceControlRepositoryError({
-            operation: "cloneRepository",
-            provider: "unknown",
-            detail: "Destination path already exists and is not empty.",
-          });
-        }
+        return {
+          destinationPath: normalizedDestination,
+          parentPath: path.dirname(normalizedDestination),
+          directoryName: path.basename(normalizedDestination),
+          occupied: entries.length > 0,
+        } as const;
       } else {
         yield* fileSystem.makeDirectory(path.dirname(normalizedDestination), { recursive: true });
       }
@@ -173,49 +190,93 @@ export const make = Effect.gen(function* () {
         destinationPath: normalizedDestination,
         parentPath: path.dirname(normalizedDestination),
         directoryName: path.basename(normalizedDestination),
-      };
+        occupied: false,
+      } as const;
     },
   );
+
+  const isMatchingClone = Effect.fn("SourceControlRepositoryService.isMatchingClone")(function* (
+    destinationPath: string,
+    remoteUrl: string,
+  ) {
+    const repositoryRoot = yield* git.execute({
+      operation: "SourceControlRepositoryService.cloneRepository.verifyRoot",
+      cwd: destinationPath,
+      args: ["rev-parse", "--show-toplevel"],
+      timeoutMs: 5_000,
+      maxOutputBytes: 16 * 1024,
+    });
+    const reportedRoot = repositoryRoot.stdout.trim();
+    if (reportedRoot.length === 0) return false;
+    const [canonicalDestination, canonicalRoot] = yield* Effect.all([
+      fileSystem.realPath(destinationPath),
+      fileSystem.realPath(reportedRoot),
+    ]);
+    if (canonicalDestination !== canonicalRoot) return false;
+    const existingRemote = yield* git.readConfigValue(destinationPath, "remote.origin.url");
+    return (
+      existingRemote !== null &&
+      normalizeGitRemoteUrl(existingRemote) === normalizeGitRemoteUrl(remoteUrl)
+    );
+  });
 
   const cloneRepository = Effect.fn("SourceControlRepositoryService.cloneRepository")(function* (
     input: SourceControlCloneRepositoryInput,
   ) {
-    const preparedDestination = yield* prepareDestination(input.destinationPath);
-    let repository: SourceControlRepositoryInfo | null = null;
-    let remoteUrl = input.remoteUrl?.trim() ?? null;
-    let provider: SourceControlProviderKind = input.provider ?? "unknown";
+    const destinationPath = yield* normalizeDestinationPath(input.destinationPath);
+    const semaphore = yield* cloneSemaphoreFor(destinationPath);
+    return yield* semaphore.withPermit(
+      Effect.gen(function* () {
+        const parentPath = path.dirname(destinationPath);
+        let repository: SourceControlRepositoryInfo | null = null;
+        let remoteUrl = input.remoteUrl?.trim() ?? null;
+        let provider: SourceControlProviderKind = input.provider ?? "unknown";
 
-    if (input.provider && input.repository) {
-      repository = yield* lookupRepository({
-        provider: input.provider,
-        repository: input.repository,
-        cwd: preparedDestination.parentPath,
-      });
-      remoteUrl = selectRemoteUrl(repository, input.protocol);
-      provider = input.provider;
-    }
+        if (input.provider && input.repository) {
+          repository = yield* lookupRepository({
+            provider: input.provider,
+            repository: input.repository,
+            cwd: parentPath,
+          });
+          remoteUrl = selectRemoteUrl(repository, input.protocol);
+          provider = input.provider;
+        }
 
-    if (!remoteUrl) {
-      return yield* new SourceControlRepositoryError({
-        operation: "cloneRepository",
-        provider,
-        detail: "Enter a repository path or clone URL before cloning.",
-      });
-    }
+        if (!remoteUrl) {
+          return yield* new SourceControlRepositoryError({
+            operation: "cloneRepository",
+            provider,
+            detail: "Enter a repository path or clone URL before cloning.",
+          });
+        }
 
-    yield* git.execute({
-      operation: "SourceControlRepositoryService.cloneRepository",
-      cwd: preparedDestination.parentPath,
-      args: ["clone", remoteUrl, preparedDestination.directoryName],
-      timeoutMs: 120_000,
-      maxOutputBytes: 256 * 1024,
-    });
+        const preparedDestination = yield* prepareDestination(destinationPath);
+        if (preparedDestination.occupied) {
+          const matches = yield* isMatchingClone(destinationPath, remoteUrl).pipe(
+            Effect.orElseSucceed(() => false),
+          );
+          if (!matches) {
+            return yield* new SourceControlRepositoryError({
+              operation: "cloneRepository",
+              provider,
+              detail:
+                "Destination path already exists and is not a clone of the requested repository.",
+            });
+          }
+          return { cwd: destinationPath, remoteUrl, repository };
+        }
 
-    return {
-      cwd: preparedDestination.destinationPath,
-      remoteUrl,
-      repository,
-    };
+        yield* git.execute({
+          operation: "SourceControlRepositoryService.cloneRepository",
+          cwd: preparedDestination.parentPath,
+          args: ["clone", remoteUrl, preparedDestination.directoryName],
+          timeoutMs: 120_000,
+          maxOutputBytes: 256 * 1024,
+        });
+
+        return { cwd: destinationPath, remoteUrl, repository };
+      }),
+    );
   });
 
   const publishRepository = Effect.fn("SourceControlRepositoryService.publishRepository")(

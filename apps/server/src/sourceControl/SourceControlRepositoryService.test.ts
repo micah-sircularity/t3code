@@ -9,6 +9,8 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { GitCommandError, SourceControlProviderError } from "@t3tools/contracts";
 
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import type * as SourceControlProvider from "./SourceControlProvider.ts";
@@ -51,6 +53,10 @@ function processOutput(): GitVcsDriver.ExecuteGitResult {
     stdoutTruncated: false,
     stderrTruncated: false,
   };
+}
+
+function processOutputWithStdout(stdout: string): GitVcsDriver.ExecuteGitResult {
+  return { ...processOutput(), stdout };
 }
 
 function makeLayer(input: {
@@ -188,6 +194,123 @@ it.effect("clones a looked-up repository into the requested destination", () =>
                 cloneCalls.push({ cwd: input.cwd, args: input.args });
                 return processOutput();
               }),
+          },
+        }),
+      ),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("recovers a matching completed clone and rejects unrelated contents", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const parent = yield* fs.makeTempDirectoryScoped({
+      prefix: "t3-source-control-recover-clone-",
+    });
+    const matchingDestination = `${parent}/matching`;
+    const unrelatedDestination = `${parent}/unrelated`;
+    yield* fs.makeDirectory(matchingDestination);
+    yield* fs.makeDirectory(unrelatedDestination);
+    yield* fs.writeFileString(`${matchingDestination}/README.md`, "matching clone");
+    yield* fs.writeFileString(`${unrelatedDestination}/README.md`, "unrelated repository");
+    const cloneCalls: Array<ReadonlyArray<string>> = [];
+
+    yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      const recovered = yield* service.cloneRepository({
+        remoteUrl: CLONE_URLS.url,
+        destinationPath: matchingDestination,
+      });
+      assert.strictEqual(recovered.cwd, matchingDestination);
+      assert.deepStrictEqual(cloneCalls, []);
+
+      const mismatch = yield* Effect.flip(
+        service.cloneRepository({
+          remoteUrl: CLONE_URLS.url,
+          destinationPath: unrelatedDestination,
+        }),
+      );
+      assert.strictEqual(
+        mismatch.detail,
+        "Destination path already exists and is not a clone of the requested repository.",
+      );
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          git: {
+            execute: (input) => {
+              if (input.args[0] === "rev-parse") {
+                return Effect.succeed(
+                  processOutputWithStdout(
+                    input.cwd === matchingDestination ? matchingDestination : unrelatedDestination,
+                  ),
+                );
+              }
+              cloneCalls.push(input.args);
+              return Effect.succeed(processOutput());
+            },
+            readConfigValue: (cwd) =>
+              Effect.succeed(
+                cwd === matchingDestination
+                  ? "git@github.com:octocat/t3code.git"
+                  : "https://github.com/acme/other.git",
+              ),
+          },
+        }),
+      ),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("serializes overlapping clones to one destination and reuses the verified result", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const parent = yield* fs.makeTempDirectoryScoped({
+      prefix: "t3-source-control-overlap-clone-",
+    });
+    const destinationPath = `${parent}/t3code`;
+    const cloneEntered = yield* Deferred.make<void>();
+    const allowClone = yield* Deferred.make<void>();
+    let cloneCount = 0;
+
+    yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      const first = yield* Effect.forkChild(
+        service.cloneRepository({ remoteUrl: CLONE_URLS.url, destinationPath }),
+        { startImmediately: true },
+      );
+      yield* Deferred.await(cloneEntered);
+      const second = yield* Effect.forkChild(
+        service.cloneRepository({ remoteUrl: CLONE_URLS.url, destinationPath }),
+        { startImmediately: true },
+      );
+      yield* Deferred.succeed(allowClone, undefined);
+      const results = yield* Effect.all([Fiber.join(first), Fiber.join(second)]);
+      assert.deepStrictEqual(
+        results.map((result) => result.cwd),
+        [destinationPath, destinationPath],
+      );
+      assert.strictEqual(cloneCount, 1);
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          git: {
+            execute: (input) => {
+              if (input.args[0] === "clone") {
+                cloneCount += 1;
+                return fs
+                  .makeDirectory(destinationPath)
+                  .pipe(
+                    Effect.andThen(fs.writeFileString(`${destinationPath}/README.md`, "cloned")),
+                    Effect.andThen(Deferred.succeed(cloneEntered, undefined)),
+                    Effect.andThen(Deferred.await(allowClone)),
+                    Effect.as(processOutput()),
+                    Effect.orDie,
+                  );
+              }
+              return Effect.succeed(processOutputWithStdout(destinationPath));
+            },
+            readConfigValue: () => Effect.succeed(CLONE_URLS.url),
           },
         }),
       ),

@@ -49,6 +49,7 @@ import {
   settleThread,
   startThreadTurn,
   unsettleThread,
+  updateProject,
   updateThreadMetadata,
 } from "./commands.ts";
 
@@ -153,6 +154,29 @@ describe("V2 environment commands", () => {
           title: "Project",
           workspaceRoot: "/workspace/project",
           createWorkspaceRootIfMissing: true,
+        },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("preserves omitted and explicit-null project settings", () =>
+    Effect.gen(function* () {
+      const projects: ProjectMutation[] = [];
+      const supervisor = yield* makeSupervisor({ commands: [], projects });
+
+      yield* updateProject({
+        projectId: ProjectId.make("project-1"),
+        defaultThreadEnvMode: null,
+        faviconPath: null,
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      expect(projects).toEqual([
+        {
+          type: "project.update",
+          commandId: "00000000-0000-4000-8000-000000000000",
+          projectId: "project-1",
+          defaultThreadEnvMode: null,
+          faviconPath: null,
         },
       ]);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),

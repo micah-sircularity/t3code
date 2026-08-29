@@ -218,7 +218,7 @@ export function projectEvent(
             title: payload.title,
             workspaceRoot: payload.workspaceRoot,
             defaultModelSelection: payload.defaultModelSelection,
-            defaultThreadEnvMode: null,
+            defaultThreadEnvMode: payload.defaultThreadEnvMode ?? null,
             faviconPath: payload.faviconPath ?? null,
             scripts: payload.scripts,
             createdAt: payload.createdAt,

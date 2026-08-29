@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { RepositoryIdentity } from "./environment.ts";
+import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import {
   CommandId,
@@ -44,6 +44,7 @@ export const Project = Schema.Struct({
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   faviconPath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
+  defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
   scripts: Schema.Array(ProjectScript),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -76,6 +77,8 @@ export const ProjectMutation = Schema.Union([
     workspaceRoot: TrimmedNonEmptyString,
     createWorkspaceRootIfMissing: Schema.optional(Schema.Boolean),
     defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
+    defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
+    faviconPath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     scripts: Schema.optional(Schema.Array(ProjectScript)),
   }),
   Schema.Struct({
@@ -85,6 +88,8 @@ export const ProjectMutation = Schema.Union([
     title: Schema.optional(TrimmedNonEmptyString),
     workspaceRoot: Schema.optional(TrimmedNonEmptyString),
     defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
+    defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
+    faviconPath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
     scripts: Schema.optional(Schema.Array(ProjectScript)),
   }),
   Schema.Struct({

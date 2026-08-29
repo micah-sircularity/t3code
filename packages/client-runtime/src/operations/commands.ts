@@ -18,6 +18,7 @@ import {
   type RunId,
   type RuntimeMode,
   type RuntimeRequestId,
+  type ThreadEnvMode,
   type ThreadId,
   type UploadChatAttachment,
 } from "@t3tools/contracts";
@@ -38,6 +39,8 @@ export interface CreateProjectInput extends CommandMetadata {
   readonly workspaceRoot: string;
   readonly createWorkspaceRootIfMissing?: boolean;
   readonly defaultModelSelection?: ModelSelection | null;
+  readonly defaultThreadEnvMode?: ThreadEnvMode | null;
+  readonly faviconPath?: string | null;
   readonly scripts?: ReadonlyArray<ProjectScript>;
 }
 
@@ -46,6 +49,8 @@ export interface UpdateProjectInput extends CommandMetadata {
   readonly title?: string;
   readonly workspaceRoot?: string;
   readonly defaultModelSelection?: ModelSelection | null;
+  readonly defaultThreadEnvMode?: ThreadEnvMode | null;
+  readonly faviconPath?: string | null;
   readonly scripts?: ReadonlyArray<ProjectScript>;
 }
 
@@ -277,6 +282,8 @@ const mutateProject = Effect.fn("EnvironmentCommands.mutateProject")(function* (
         readonly workspaceRoot: string;
         readonly createWorkspaceRootIfMissing?: boolean;
         readonly defaultModelSelection?: ModelSelection | null;
+        readonly defaultThreadEnvMode?: ThreadEnvMode | null;
+        readonly faviconPath?: string | null;
         readonly scripts?: ReadonlyArray<ProjectScript>;
       }
     | {
@@ -286,6 +293,8 @@ const mutateProject = Effect.fn("EnvironmentCommands.mutateProject")(function* (
         readonly title?: string;
         readonly workspaceRoot?: string;
         readonly defaultModelSelection?: ModelSelection | null;
+        readonly defaultThreadEnvMode?: ThreadEnvMode | null;
+        readonly faviconPath?: string | null;
         readonly scripts?: ReadonlyArray<ProjectScript>;
       }
     | {
@@ -313,6 +322,10 @@ export const createProject = Effect.fn("EnvironmentCommands.createProject")(func
     ...(input.defaultModelSelection === undefined
       ? {}
       : { defaultModelSelection: input.defaultModelSelection }),
+    ...(input.defaultThreadEnvMode === undefined
+      ? {}
+      : { defaultThreadEnvMode: input.defaultThreadEnvMode }),
+    ...(input.faviconPath === undefined ? {} : { faviconPath: input.faviconPath }),
     ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
   });
 });
@@ -329,6 +342,10 @@ export const updateProject = Effect.fn("EnvironmentCommands.updateProject")(func
     ...(input.defaultModelSelection === undefined
       ? {}
       : { defaultModelSelection: input.defaultModelSelection }),
+    ...(input.defaultThreadEnvMode === undefined
+      ? {}
+      : { defaultThreadEnvMode: input.defaultThreadEnvMode }),
+    ...(input.faviconPath === undefined ? {} : { faviconPath: input.faviconPath }),
     ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
   });
 });

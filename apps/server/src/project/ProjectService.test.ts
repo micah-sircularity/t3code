@@ -90,6 +90,8 @@ it.layer(TestLayer)("ProjectService", (it) => {
         title: "Project",
         workspaceRoot: "/work/project/",
         defaultModelSelection: modelSelection,
+        defaultThreadEnvMode: "worktree",
+        faviconPath: "/work/project/custom-icon.svg",
         scripts: [
           {
             id: "setup",
@@ -102,22 +104,27 @@ it.layer(TestLayer)("ProjectService", (it) => {
       });
       assert.equal(created.workspaceRoot, "/work/project");
       assert.isNull(created.repositoryIdentity);
-      assert.isNull(created.faviconPath);
+      assert.equal(created.defaultThreadEnvMode, "worktree");
+      assert.equal(created.faviconPath, "/work/project/custom-icon.svg");
 
       const hydratedCreated = yield* waitForProject(
         service,
         projectId,
-        (project) => project.repositoryIdentity !== null && project.faviconPath !== null,
+        (project) => project.repositoryIdentity !== null,
       );
       assert.equal(hydratedCreated?.repositoryIdentity?.canonicalKey, "github.com/t3tools/project");
-      assert.equal(hydratedCreated?.faviconPath, "/work/project/favicon.svg");
+      assert.equal(hydratedCreated?.faviconPath, "/work/project/custom-icon.svg");
 
       const updated = yield* service.update({
         commandId: CommandId.make("command:project:update"),
         projectId,
         title: "Renamed",
+        defaultThreadEnvMode: null,
+        faviconPath: null,
       });
       assert.equal(updated.title, "Renamed");
+      assert.isNull(updated.defaultThreadEnvMode);
+      assert.equal(updated.faviconPath, "/work/project/favicon.svg");
       assert.equal(updated.createdAt, created.createdAt);
 
       const byId = yield* service.getById(projectId);

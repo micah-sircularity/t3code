@@ -14,3 +14,13 @@ T3 Code supports SVG, PNG, ICO, JPEG, GIF, AVIF, and WebP files. The selected pa
 each checkout in the project group and appears on your connected clients.
 
 To use automatic detection again, select **Automatic**.
+
+# Let an agent manage projects
+
+Agents running through T3 Code can list and inspect projects in their current environment. They can
+also register an existing directory, create a missing directory, clone and register a repository,
+or update the same project settings available in the app.
+
+Removing a project does not remove its directory, repository, worktrees, or other workspace files.
+If the project still has threads, the agent must explicitly request that T3 Code delete those thread
+records first. This prevents a project removal from silently discarding conversations.
