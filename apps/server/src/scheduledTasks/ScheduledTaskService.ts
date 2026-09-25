@@ -31,6 +31,11 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import {
+  type NormalizedWebhookEvent,
+  renderWebhookEvent,
+  webhookFilterAccepts,
+} from "./WebhookEvent.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
@@ -101,9 +106,11 @@ export class ScheduledTaskService extends Context.Service<
       readonly id: ScheduledTaskId;
       readonly token: string;
       readonly deliveryId: string;
-      readonly source: string;
-      readonly event: string;
-    }) => Effect.Effect<ScheduledTaskRunNowResult | null, ScheduledTaskError>;
+      readonly event: NormalizedWebhookEvent;
+    }) => Effect.Effect<
+      (ScheduledTaskRunNowResult & { readonly skipped: boolean }) | null,
+      ScheduledTaskError
+    >;
   }
 >()("t3/scheduledTasks/ScheduledTaskService") {}
 
@@ -874,16 +881,19 @@ export const layer = Layer.effect(
         if (!task.enabled) {
           return yield* taskError("Webhook task is paused.", { taskId: task.id });
         }
+        if (!webhookFilterAccepts(task.schedule, input.event)) {
+          return { task: withWebhookPath(task), skipped: true };
+        }
         const next = yield* runTask(task, "webhook", {
           deliveryId: input.deliveryId,
-          source: input.source,
-          text: input.event,
+          source: input.event.keys[0] ?? input.event.source,
+          text: renderWebhookEvent(input.event),
         }).pipe(
           Effect.mapError((cause) =>
             taskError("Could not run webhook task.", { taskId: input.id, cause }),
           ),
         );
-        return { task: withWebhookPath(next) };
+        return { task: withWebhookPath(next), skipped: false };
       });
 
     return ScheduledTaskService.of({
