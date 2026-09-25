@@ -3,6 +3,7 @@ import {
   Clock3Icon,
   MoreHorizontalIcon,
   PencilIcon,
+  CopyIcon,
   PlayIcon,
   PlusIcon,
   Trash2Icon,
@@ -149,6 +150,7 @@ function splitModelKey(value: string): ModelSelection | null {
 }
 
 function scheduleFromDraft(draft: DraftState): ScheduledTaskSchedule {
+  if (draft.scheduleMode === "webhook") return { type: "webhook" };
   if (draft.scheduleMode === "interval") {
     const everyMs = Math.round(Number(draft.intervalMinutes) * 60_000);
     return { type: "interval", everyMs };
@@ -162,6 +164,7 @@ function scheduleFromDraft(draft: DraftState): ScheduledTaskSchedule {
 }
 
 export function scheduleLabel(schedule: ScheduledTaskSchedule): string {
+  if (schedule.type === "webhook") return "On webhook";
   if (schedule.type === "interval") {
     const minutes = schedule.everyMs / 60_000;
     return Number.isInteger(minutes)
@@ -176,6 +179,13 @@ export function scheduleLabel(schedule: ScheduledTaskSchedule): string {
         ? "Weekdays"
         : weekdays.map((day) => WEEKDAY_LABELS[day]).join(", ");
   return `${days} at ${schedule.timeOfDay}`;
+}
+
+/** Funnel serves webhooks on the default HTTPS port of the same tailnet host. */
+async function copyWebhookUrl(path: string) {
+  const url = `${window.location.protocol}//${window.location.hostname}${path}`;
+  await navigator.clipboard.writeText(url);
+  toastManager.add({ type: "success", title: "Webhook URL copied" });
 }
 
 /**
@@ -453,6 +463,12 @@ function ScheduledTaskRow({
                 <PencilIcon />
                 Edit
               </MenuItem>
+              {task.webhookPath ? (
+                <MenuItem onClick={() => void copyWebhookUrl(task.webhookPath ?? "")}>
+                  <CopyIcon />
+                  Copy webhook URL
+                </MenuItem>
+              ) : null}
               <MenuItem onClick={() => void act("run")}>
                 <PlayIcon />
                 Run now
@@ -826,12 +842,13 @@ function ScheduledTaskEditorDialog({
                   value={[draft.scheduleMode]}
                   onValueChange={(values) => {
                     const mode = values[0];
-                    if (mode === "fixed" || mode === "interval")
+                    if (mode === "fixed" || mode === "interval" || mode === "webhook")
                       setDraft((current) => ({ ...current, scheduleMode: mode }));
                   }}
                 >
                   <Toggle value="fixed">At a time</Toggle>
                   <Toggle value="interval">Every interval</Toggle>
+                  <Toggle value="webhook">On webhook</Toggle>
                 </ToggleGroup>
               </div>
 
@@ -872,6 +889,11 @@ function ScheduledTaskEditorDialog({
                     ))}
                   </ToggleGroup>
                 </div>
+              ) : draft.scheduleMode === "webhook" ? (
+                <p className="text-sm text-muted-foreground">
+                  Runs once per event posted to this task&apos;s webhook URL. Copy the URL from the
+                  task menu after saving.
+                </p>
               ) : (
                 <div className="flex items-center gap-2">
                   <Label htmlFor="scheduled-task-interval">Run every</Label>
