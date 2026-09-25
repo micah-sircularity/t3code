@@ -34,6 +34,7 @@ import * as Result from "effect/Result";
 import * as ServerConfig from "./config.ts";
 import * as ScheduledTaskService from "./scheduledTasks/ScheduledTaskService.ts";
 import { SCHEDULED_TASK_WEBHOOK_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
+import { normalizeWebhookEvent } from "./scheduledTasks/WebhookEvent.ts";
 import { ASSET_ROUTE_PREFIX, resolveAsset } from "./assets/AssetAccess.ts";
 import { githubMediaResponse } from "./assets/GitHubMediaFetch.ts";
 import { statMediaFile, streamMediaFile, type OpenMediaFile } from "./assets/MediaFile.ts";
@@ -439,8 +440,6 @@ export const assetRouteLayer = HttpRouter.add(
   }),
 );
 
-const WEBHOOK_EVENT_MAX_CHARS = 60_000;
-
 export const scheduledTaskWebhookRouteLayer = HttpRouter.add(
   "POST",
   `${SCHEDULED_TASK_WEBHOOK_PREFIX}/*`,
@@ -459,20 +458,17 @@ export const scheduledTaskWebhookRouteLayer = HttpRouter.add(
     }
 
     const body = yield* request.text.pipe(Effect.orElseSucceed(() => ""));
-    const githubEvent = request.headers["x-github-event"];
-    const source =
-      githubEvent !== undefined
-        ? `github:${githubEvent}`
-        : (url.value.searchParams.get("source") ?? request.headers["x-webhook-source"] ?? "webhook");
+    const event = normalizeWebhookEvent({
+      headers: request.headers,
+      body,
+      sourceHint:
+        url.value.searchParams.get("source") ?? request.headers["x-webhook-source"] ?? null,
+    });
     const deliveryId =
       request.headers["x-github-delivery"] ??
       request.headers["x-delivery-id"] ??
       request.headers["x-request-id"] ??
       createHash("sha256").update(body).digest("hex").slice(0, 32);
-    const event =
-      body.length > WEBHOOK_EVENT_MAX_CHARS
-        ? `${body.slice(0, WEBHOOK_EVENT_MAX_CHARS)}\n…[truncated ${body.length - WEBHOOK_EVENT_MAX_CHARS} chars]`
-        : body;
 
     const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
     const result = yield* scheduledTasks
@@ -480,7 +476,6 @@ export const scheduledTaskWebhookRouteLayer = HttpRouter.add(
         id: ScheduledTaskId.make(decodeURIComponent(rawId)),
         token,
         deliveryId,
-        source,
         event,
       })
       .pipe(Effect.result);
@@ -490,11 +485,18 @@ export const scheduledTaskWebhookRouteLayer = HttpRouter.add(
     if (result.success === null) {
       return HttpServerResponse.text("Not Found", { status: 404 });
     }
-    const { task } = result.success;
+    const { task, skipped } = result.success;
+    if (skipped) {
+      return HttpServerResponse.jsonUnsafe(
+        { taskId: task.id, deliveryId, skipped: true, event: event.keys[0] ?? event.source },
+        { status: 202 },
+      );
+    }
     return HttpServerResponse.jsonUnsafe(
       {
         taskId: task.id,
         deliveryId,
+        event: event.keys[0] ?? event.source,
         status: task.lastRunStatus,
         error: task.lastRunError,
         runCount: task.runCount,

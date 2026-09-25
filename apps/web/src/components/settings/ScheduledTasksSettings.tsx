@@ -75,6 +75,7 @@ import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { ScheduledTaskPromptEditor } from "./ScheduledTaskPromptEditor";
+import { WebhookFilterFields } from "./WebhookFilterFields";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
@@ -102,6 +103,8 @@ const EMPTY_DRAFT: DraftState = {
   prompt: "",
   enabled: true,
   scheduleMode: "fixed",
+  webhookSource: "any",
+  webhookEvents: "",
   intervalMinutes: "15",
   timeOfDay: "09:00",
   weekdays: new Set([1, 2, 3, 4, 5]),
@@ -152,7 +155,21 @@ function splitModelKey(value: string): ModelSelection | null {
 }
 
 function scheduleFromDraft(draft: DraftState): ScheduledTaskSchedule {
-  if (draft.scheduleMode === "webhook") return { type: "webhook" };
+  if (draft.scheduleMode === "webhook") {
+    const events = [
+      ...new Set(
+        draft.webhookEvents
+          .split(/[\s,]+/u)
+          .map((event) => event.trim())
+          .filter((event) => event.length > 0),
+      ),
+    ];
+    return {
+      type: "webhook",
+      ...(draft.webhookSource === "any" ? {} : { source: draft.webhookSource }),
+      ...(events.length > 0 ? { events } : {}),
+    };
+  }
   if (draft.scheduleMode === "interval") {
     const everyMs = Math.round(Number(draft.intervalMinutes) * 60_000);
     return { type: "interval", everyMs };
@@ -166,7 +183,13 @@ function scheduleFromDraft(draft: DraftState): ScheduledTaskSchedule {
 }
 
 export function scheduleLabel(schedule: ScheduledTaskSchedule): string {
-  if (schedule.type === "webhook") return "On webhook";
+  if (schedule.type === "webhook") {
+    const source =
+      schedule.source === "github" ? "GitHub" : schedule.source === "basecamp" ? "Basecamp" : null;
+    const events = schedule.events ?? [];
+    const scope = events.length === 0 ? "any event" : events.join(", ");
+    return source === null ? `On webhook · ${scope}` : `On ${source} webhook · ${scope}`;
+  }
   if (schedule.type === "interval") {
     const minutes = schedule.everyMs / 60_000;
     return Number.isInteger(minutes)
@@ -904,10 +927,17 @@ function ScheduledTaskEditorDialog({
                   </ToggleGroup>
                 </div>
               ) : draft.scheduleMode === "webhook" ? (
-                <p className="text-sm text-muted-foreground">
-                  Runs once per event posted to this task&apos;s webhook URL. Copy the URL from the
-                  task menu after saving.
-                </p>
+                <WebhookFilterFields
+                  source={draft.webhookSource}
+                  events={draft.webhookEvents}
+                  disabled={saving}
+                  onSourceChange={(webhookSource) =>
+                    setDraft((current) => ({ ...current, webhookSource }))
+                  }
+                  onEventsChange={(webhookEvents) =>
+                    setDraft((current) => ({ ...current, webhookEvents }))
+                  }
+                />
               ) : (
                 <div className="flex items-center gap-2">
                   <Label htmlFor="scheduled-task-interval">Run every</Label>

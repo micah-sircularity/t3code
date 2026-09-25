@@ -3,6 +3,7 @@ import {
   type ProjectId,
   ScheduledTaskId,
   type ScheduledTask,
+  type ScheduledTaskWebhookSource,
   type ModelSelection,
   type RuntimeMode,
   type ProviderInteractionMode,
@@ -52,6 +53,9 @@ export interface DraftState {
   readonly prompt: string;
   readonly enabled: boolean;
   readonly scheduleMode: ScheduleMode;
+  readonly webhookSource: ScheduledTaskWebhookSource;
+  /** Comma- or newline-separated event keys; empty accepts every event. */
+  readonly webhookEvents: string;
   readonly intervalMinutes: string;
   readonly timeOfDay: string;
   readonly weekdays: ReadonlySet<number>;
@@ -86,6 +90,8 @@ export function taskToDraft(task: ScheduledTask): DraftState {
     enabled: task.enabled,
     scheduleMode:
       schedule.type === "interval" ? "interval" : schedule.type === "webhook" ? "webhook" : "fixed",
+    webhookSource: schedule.type === "webhook" ? (schedule.source ?? "any") : "any",
+    webhookEvents: schedule.type === "webhook" ? (schedule.events ?? []).join(", ") : "",
     intervalMinutes:
       schedule.type === "interval" ? String(Math.max(1, schedule.everyMs / 60_000)) : "15",
     timeOfDay: schedule.type === "fixed_time" ? schedule.timeOfDay : "09:00",
