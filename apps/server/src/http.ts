@@ -27,7 +27,13 @@ import {
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import { OtlpTracer, OtlpSerialization } from "effect/unstable/observability";
 
+import { createHash } from "node:crypto";
+import { ScheduledTaskId } from "@t3tools/contracts";
+import * as Result from "effect/Result";
+
 import * as ServerConfig from "./config.ts";
+import * as ScheduledTaskService from "./scheduledTasks/ScheduledTaskService.ts";
+import { SCHEDULED_TASK_WEBHOOK_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
 import { ASSET_ROUTE_PREFIX, resolveAsset } from "./assets/AssetAccess.ts";
 import { githubMediaResponse } from "./assets/GitHubMediaFetch.ts";
 import { statMediaFile, streamMediaFile, type OpenMediaFile } from "./assets/MediaFile.ts";
@@ -415,6 +421,71 @@ export const assetRouteLayer = HttpRouter.add(
       request.method === "HEAD" ? "HEAD" : "GET",
     ).pipe(
       Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })),
+    );
+  }),
+);
+
+const WEBHOOK_EVENT_MAX_CHARS = 60_000;
+
+export const scheduledTaskWebhookRouteLayer = HttpRouter.add(
+  "POST",
+  `${SCHEDULED_TASK_WEBHOOK_PREFIX}/*`,
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const url = HttpServerRequest.toURL(request);
+    if (Option.isNone(url)) {
+      return HttpServerResponse.text("Bad Request", { status: 400 });
+    }
+    const rawId = url.value.pathname.slice(`${SCHEDULED_TASK_WEBHOOK_PREFIX}/`.length);
+    const bearer = /^Bearer\s+(.+)$/i.exec(request.headers["authorization"] ?? "")?.[1];
+    const token =
+      url.value.searchParams.get("token") ?? request.headers["x-webhook-secret"] ?? bearer ?? "";
+    if (!rawId || !token) {
+      return HttpServerResponse.text("Not Found", { status: 404 });
+    }
+
+    const body = yield* request.text.pipe(Effect.orElseSucceed(() => ""));
+    const githubEvent = request.headers["x-github-event"];
+    const source =
+      githubEvent !== undefined
+        ? `github:${githubEvent}`
+        : (url.value.searchParams.get("source") ?? request.headers["x-webhook-source"] ?? "webhook");
+    const deliveryId =
+      request.headers["x-github-delivery"] ??
+      request.headers["x-delivery-id"] ??
+      request.headers["x-request-id"] ??
+      createHash("sha256").update(body).digest("hex").slice(0, 32);
+    const event =
+      body.length > WEBHOOK_EVENT_MAX_CHARS
+        ? `${body.slice(0, WEBHOOK_EVENT_MAX_CHARS)}\n…[truncated ${body.length - WEBHOOK_EVENT_MAX_CHARS} chars]`
+        : body;
+
+    const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
+    const result = yield* scheduledTasks
+      .runWebhook({
+        id: ScheduledTaskId.make(decodeURIComponent(rawId)),
+        token,
+        deliveryId,
+        source,
+        event,
+      })
+      .pipe(Effect.result);
+    if (Result.isFailure(result)) {
+      return HttpServerResponse.jsonUnsafe({ error: result.failure.message }, { status: 409 });
+    }
+    if (result.success === null) {
+      return HttpServerResponse.text("Not Found", { status: 404 });
+    }
+    const { task } = result.success;
+    return HttpServerResponse.jsonUnsafe(
+      {
+        taskId: task.id,
+        deliveryId,
+        status: task.lastRunStatus,
+        error: task.lastRunError,
+        runCount: task.runCount,
+      },
+      { status: task.lastRunStatus === "failed" ? 502 : 202 },
     );
   }),
 );
