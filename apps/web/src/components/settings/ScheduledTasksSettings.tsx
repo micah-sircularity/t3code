@@ -22,6 +22,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   MIN_SCHEDULED_TASK_INTERVAL_MS,
+  ProviderDriverKind,
   ProviderInstanceId,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
@@ -73,7 +74,8 @@ import {
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
-import { Textarea } from "../ui/textarea";
+import { ScheduledTaskPromptEditor } from "./ScheduledTaskPromptEditor";
+import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
   SettingsPageContainer,
@@ -547,6 +549,19 @@ function ScheduledTaskEditorDialog({
   const activeInstanceId =
     activeSelection?.instanceId ?? firstInstance?.instanceId ?? ("" as ProviderInstanceId);
   const activeModel = activeSelection?.model ?? "";
+  const activeInstanceEntry = instanceEntries.find(
+    (entry) => entry.instanceId === activeInstanceId,
+  );
+  const activeSkills = useMemo(
+    () =>
+      activeInstanceEntry
+        ? resolveProviderSkillsForCwd(
+            activeInstanceEntry.snapshot,
+            selectedProject?.workspaceRoot ?? null,
+          )
+        : [],
+    [activeInstanceEntry, selectedProject?.workspaceRoot],
+  );
   const modelOptionsByInstance = useMemo(
     () => getCustomModelOptionsByInstance(settings, providers, activeInstanceId, activeModel),
     [settings, providers, activeInstanceId, activeModel],
@@ -651,7 +666,7 @@ function ScheduledTaskEditorDialog({
         <DialogHeader>
           <DialogTitle>{draft.editingId ? "Edit task" : "New task"}</DialogTitle>
           <DialogDescription>
-            Run a prompt automatically — on an interval or at a fixed time.
+            Run a prompt automatically — on an interval, at a fixed time, or on webhook events.
           </DialogDescription>
         </DialogHeader>
 
@@ -800,14 +815,13 @@ function ScheduledTaskEditorDialog({
             ) : null}
 
             <Field label="Prompt" htmlFor="scheduled-task-prompt">
-              <Textarea
-                id="scheduled-task-prompt"
-                className="max-h-64 overflow-y-auto"
-                placeholder="What should the agent do each time this runs?"
+              <ScheduledTaskPromptEditor
                 value={draft.prompt}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, prompt: event.target.value }))
-                }
+                skills={activeSkills}
+                provider={activeInstanceEntry?.driverKind ?? ("codex" as ProviderDriverKind)}
+                disabled={saving || !connected}
+                placeholder="What should the agent do each time this runs? Type $ to add a skill."
+                onChange={(prompt) => setDraft((current) => ({ ...current, prompt }))}
               />
             </Field>
 
