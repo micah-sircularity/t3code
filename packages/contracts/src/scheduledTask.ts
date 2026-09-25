@@ -54,9 +54,20 @@ const ScheduledTaskFixedTimeSchedule = Schema.Struct({
   description: "Run at a fixed local wall-clock time on selected weekdays.",
 });
 
+export const ScheduledTaskWebhookSource = Schema.Literals(["any", "github", "basecamp"]);
+export type ScheduledTaskWebhookSource = typeof ScheduledTaskWebhookSource.Type;
+
 const ScheduledTaskWebhookSchedule = Schema.Struct({
   type: Schema.Literal("webhook").annotate({
     description: "Select webhook triggering.",
+  }),
+  source: Schema.optional(ScheduledTaskWebhookSource).annotate({
+    description:
+      "Expected sender. 'github' and 'basecamp' deliveries are normalized into a summary; other senders are rejected when set.",
+  }),
+  events: Schema.optional(Schema.Array(TrimmedNonEmptyString)).annotate({
+    description:
+      "Event keys that start a run, such as 'pull_request.opened', 'pull_request', 'deployment_status.success', or Basecamp 'todo_created'. Omit or leave empty to accept every event.",
   }),
 }).annotate({
   description: "Never run on a timer; run once per event posted to the task's webhook URL.",
