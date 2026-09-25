@@ -102,6 +102,7 @@ function describeSchedule(schedule: ScheduledTaskSchedule): string {
     }
     return `Every ${Math.round(schedule.everyMs / 1000)} seconds`;
   }
+  if (schedule.type === "webhook") return "On webhook events";
 
   const weekdayCount = schedule.weekdays?.length ?? 0;
   const days =

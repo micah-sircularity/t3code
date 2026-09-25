@@ -28,7 +28,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
@@ -228,8 +228,10 @@ export const layer = Layer.effect(
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const scheduler = yield* Scheduler.Scheduler;
     const activeRuns = yield* Ref.make<ReadonlySet<ScheduledTaskId>>(new Set());
-    const secretStore = yield* ServerSecretStore.ServerSecretStore;
-    const webhookKey = yield* secretStore.getOrCreateRandom("scheduled-task-webhook-key", 32);
+    const secretStore = yield* Effect.serviceOption(ServerSecretStore.ServerSecretStore);
+    const webhookKey = Option.isSome(secretStore)
+      ? yield* secretStore.value.getOrCreateRandom("scheduled-task-webhook-key", 32)
+      : randomBytes(32);
     const webhookToken = (id: ScheduledTaskId) =>
       createHmac("sha256", webhookKey).update(id).digest("base64url");
     const webhookTokenMatches = (id: ScheduledTaskId, token: string) => {
