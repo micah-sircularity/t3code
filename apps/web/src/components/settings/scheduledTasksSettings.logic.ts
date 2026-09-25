@@ -56,6 +56,9 @@ export interface DraftState {
   readonly webhookSource: ScheduledTaskWebhookSource;
   /** Comma- or newline-separated event keys; empty accepts every event. */
   readonly webhookEvents: string;
+  /** Sample delivery headers as JSON text; empty for none. */
+  readonly webhookSampleHeaders: string;
+  readonly webhookSampleBody: string;
   readonly intervalMinutes: string;
   readonly timeOfDay: string;
   readonly weekdays: ReadonlySet<number>;
@@ -92,6 +95,11 @@ export function taskToDraft(task: ScheduledTask): DraftState {
       schedule.type === "interval" ? "interval" : schedule.type === "webhook" ? "webhook" : "fixed",
     webhookSource: schedule.type === "webhook" ? (schedule.source ?? "any") : "any",
     webhookEvents: schedule.type === "webhook" ? (schedule.events ?? []).join(", ") : "",
+    webhookSampleHeaders:
+      schedule.type === "webhook" && schedule.sample?.headers
+        ? JSON.stringify(schedule.sample.headers, null, 2)
+        : "",
+    webhookSampleBody: schedule.type === "webhook" ? (schedule.sample?.body ?? "") : "",
     intervalMinutes:
       schedule.type === "interval" ? String(Math.max(1, schedule.everyMs / 60_000)) : "15",
     timeOfDay: schedule.type === "fixed_time" ? schedule.timeOfDay : "09:00",

@@ -76,6 +76,7 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { Switch } from "../ui/switch";
 import { ScheduledTaskPromptEditor } from "./ScheduledTaskPromptEditor";
 import { WebhookFilterFields } from "./WebhookFilterFields";
+import { WebhookSampleTest } from "./WebhookSampleTest";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
@@ -105,6 +106,8 @@ const EMPTY_DRAFT: DraftState = {
   scheduleMode: "fixed",
   webhookSource: "any",
   webhookEvents: "",
+  webhookSampleHeaders: "",
+  webhookSampleBody: "",
   intervalMinutes: "15",
   timeOfDay: "09:00",
   weekdays: new Set([1, 2, 3, 4, 5]),
@@ -154,6 +157,21 @@ function splitModelKey(value: string): ModelSelection | null {
   };
 }
 
+function sampleHeadersFromDraft(text: string): { headers?: Record<string, string> } {
+  if (text.trim() === "") return {};
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return {
+      headers: Object.fromEntries(
+        Object.entries(parsed).map(([key, value]) => [key, String(value)] as const),
+      ),
+    };
+  } catch {
+    return {};
+  }
+}
+
 function scheduleFromDraft(draft: DraftState): ScheduledTaskSchedule {
   if (draft.scheduleMode === "webhook") {
     const events = [
@@ -168,6 +186,14 @@ function scheduleFromDraft(draft: DraftState): ScheduledTaskSchedule {
       type: "webhook",
       ...(draft.webhookSource === "any" ? {} : { source: draft.webhookSource }),
       ...(events.length > 0 ? { events } : {}),
+      ...(draft.webhookSampleBody.trim() === ""
+        ? {}
+        : {
+            sample: {
+              ...sampleHeadersFromDraft(draft.webhookSampleHeaders),
+              body: draft.webhookSampleBody,
+            },
+          }),
     };
   }
   if (draft.scheduleMode === "interval") {
@@ -927,17 +953,35 @@ function ScheduledTaskEditorDialog({
                   </ToggleGroup>
                 </div>
               ) : draft.scheduleMode === "webhook" ? (
-                <WebhookFilterFields
-                  source={draft.webhookSource}
-                  events={draft.webhookEvents}
-                  disabled={saving}
-                  onSourceChange={(webhookSource) =>
-                    setDraft((current) => ({ ...current, webhookSource }))
-                  }
-                  onEventsChange={(webhookEvents) =>
-                    setDraft((current) => ({ ...current, webhookEvents }))
-                  }
-                />
+                <>
+                  <WebhookFilterFields
+                    source={draft.webhookSource}
+                    events={draft.webhookEvents}
+                    disabled={saving}
+                    onSourceChange={(webhookSource) =>
+                      setDraft((current) => ({ ...current, webhookSource }))
+                    }
+                    onEventsChange={(webhookEvents) =>
+                      setDraft((current) => ({ ...current, webhookEvents }))
+                    }
+                  />
+                  <WebhookSampleTest
+                    environmentId={environmentId}
+                    taskId={draft.editingId ? (draft.editingId as ScheduledTaskId) : null}
+                    schedule={scheduleFromDraft(draft)}
+                    prompt={draft.prompt}
+                    headers={draft.webhookSampleHeaders}
+                    body={draft.webhookSampleBody}
+                    disabled={saving || !connected}
+                    onChange={({ headers, body }) =>
+                      setDraft((current) => ({
+                        ...current,
+                        webhookSampleHeaders: headers,
+                        webhookSampleBody: body,
+                      }))
+                    }
+                  />
+                </>
               ) : (
                 <div className="flex items-center gap-2">
                   <Label htmlFor="scheduled-task-interval">Run every</Label>

@@ -1992,6 +1992,12 @@ const makeWsRpcLayer = (
             "rpc.aggregate": "scheduledTasks",
             "scheduled_task.id": input.id,
           }),
+        [WS_METHODS.scheduledTasksTestWebhook]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.scheduledTasksTestWebhook,
+            scheduledTasks.testWebhook(input),
+            { "rpc.aggregate": "scheduledTasks" },
+          ),
         [WS_METHODS.serverProbe]: (_input) =>
           observeRpcEffect(WS_METHODS.serverProbe, Effect.succeed({}), {
             "rpc.aggregate": "server",
