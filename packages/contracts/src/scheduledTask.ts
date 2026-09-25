@@ -148,6 +148,10 @@ export const ScheduledTask = Schema.Struct({
     description:
       "Server-relative URL (path and token) that triggers a webhook task; null for timed tasks.",
   }),
+  webhookUrl: Schema.optional(Schema.NullOr(Schema.String)).annotate({
+    description:
+      "Absolute public URL for the webhook when the server knows its public host (Tailscale Funnel or T3CODE_WEBHOOK_BASE_URL).",
+  }),
 });
 export type ScheduledTask = typeof ScheduledTask.Type;
 

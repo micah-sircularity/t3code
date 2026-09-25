@@ -28,7 +28,9 @@ import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { readTailscaleStatus } from "@t3tools/tailscale";
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
@@ -262,13 +264,32 @@ export const layer = Layer.effect(
       const actual = Buffer.from(token);
       return expected.length === actual.length && timingSafeEqual(expected, actual);
     };
-    const withWebhookPath = (task: ScheduledTask): ScheduledTask => ({
-      ...task,
-      webhookPath:
-        task.schedule.type === "webhook"
-          ? `${SCHEDULED_TASK_WEBHOOK_PREFIX}/${encodeURIComponent(task.id)}?token=${webhookToken(task.id)}`
-          : null,
-    });
+    const spawner = yield* Effect.serviceOption(ChildProcessSpawner.ChildProcessSpawner);
+    const configuredBase = process.env.T3CODE_WEBHOOK_BASE_URL?.trim().replace(/\/+$/u, "");
+    const webhookBaseUrl =
+      configuredBase !== undefined && configuredBase !== ""
+        ? configuredBase
+        : Option.isSome(spawner)
+          ? yield* readTailscaleStatus.pipe(
+              Effect.map((status) =>
+                status.magicDnsName === null ? null : `https://${status.magicDnsName}`,
+              ),
+              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner.value),
+              Effect.timeout("5 seconds"),
+              Effect.orElseSucceed(() => null),
+            )
+          : null;
+    const withWebhookPath = (task: ScheduledTask): ScheduledTask => {
+      if (task.schedule.type !== "webhook") {
+        return { ...task, webhookPath: null, webhookUrl: null };
+      }
+      const webhookPath = `${SCHEDULED_TASK_WEBHOOK_PREFIX}/${encodeURIComponent(task.id)}?token=${webhookToken(task.id)}`;
+      return {
+        ...task,
+        webhookPath,
+        webhookUrl: webhookBaseUrl === null ? null : `${webhookBaseUrl}${webhookPath}`,
+      };
+    };
     // Sliding(1) coalesces the dirty-signal: every notification triggers a
     // full list() re-emit anyway, so a slow subscriber only ever needs the
     // latest signal — an unbounded backlog would just grow memory.

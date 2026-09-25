@@ -232,9 +232,21 @@ export function scheduleLabel(schedule: ScheduledTaskSchedule): string {
   return `${days} at ${schedule.timeOfDay}`;
 }
 
-/** Funnel serves webhooks on the default HTTPS port of the same tailnet host. */
-async function copyWebhookUrl(path: string) {
-  const url = `${window.location.protocol}//${window.location.hostname}${path}`;
+async function copyWebhookUrl(task: ScheduledTask) {
+  const url =
+    task.webhookUrl ??
+    (window.location.protocol.startsWith("http") && task.webhookPath
+      ? `${window.location.protocol}//${window.location.hostname}${task.webhookPath}`
+      : null);
+  if (url === null) {
+    toastManager.add({
+      type: "error",
+      title: "No public webhook URL",
+      description:
+        "Enable Tailscale on this server or set T3CODE_WEBHOOK_BASE_URL, then reopen settings.",
+    });
+    return;
+  }
   await navigator.clipboard.writeText(url);
   toastManager.add({ type: "success", title: "Webhook URL copied" });
 }
@@ -515,7 +527,7 @@ function ScheduledTaskRow({
                 Edit
               </MenuItem>
               {task.webhookPath ? (
-                <MenuItem onClick={() => void copyWebhookUrl(task.webhookPath ?? "")}>
+                <MenuItem onClick={() => void copyWebhookUrl(task)}>
                   <CopyIcon />
                   Copy webhook URL
                 </MenuItem>
