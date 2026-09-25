@@ -54,6 +54,14 @@ const ScheduledTaskFixedTimeSchedule = Schema.Struct({
   description: "Run at a fixed local wall-clock time on selected weekdays.",
 });
 
+const ScheduledTaskWebhookSchedule = Schema.Struct({
+  type: Schema.Literal("webhook").annotate({
+    description: "Select webhook triggering.",
+  }),
+}).annotate({
+  description: "Never run on a timer; run once per event posted to the task's webhook URL.",
+});
+
 /**
  * Read model for persisted schedules. Keep accepting legacy sub-minute rows so
  * users can list, disable, edit, or delete them after the write minimum changes.
@@ -61,9 +69,10 @@ const ScheduledTaskFixedTimeSchedule = Schema.Struct({
 export const ScheduledTaskSchedule = Schema.Union([
   ScheduledTaskIntervalSchedule,
   ScheduledTaskFixedTimeSchedule,
+  ScheduledTaskWebhookSchedule,
 ]).annotate({
   description:
-    "Structured recurring schedule. Pass an object with type 'interval' or 'fixed_time'.",
+    "Structured schedule. Pass an object with type 'interval', 'fixed_time', or 'webhook'.",
 });
 export type ScheduledTaskSchedule = typeof ScheduledTaskSchedule.Type;
 
@@ -82,8 +91,10 @@ export const ScheduledTaskUpsertSchedule = Schema.Union([
     description: "Run repeatedly after a fixed number of milliseconds.",
   }),
   ScheduledTaskFixedTimeSchedule,
+  ScheduledTaskWebhookSchedule,
 ]).annotate({
-  description: "Writable recurring schedule. Pass an object with type 'interval' or 'fixed_time'.",
+  description:
+    "Writable schedule. Pass an object with type 'interval', 'fixed_time', or 'webhook'.",
 });
 export type ScheduledTaskUpsertSchedule = typeof ScheduledTaskUpsertSchedule.Type;
 
@@ -111,6 +122,10 @@ export const ScheduledTask = Schema.Struct({
   lastRunStatus: ScheduledTaskRunStatus,
   lastRunError: Schema.NullOr(Schema.String),
   runCount: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  webhookPath: Schema.optional(Schema.NullOr(Schema.String)).annotate({
+    description:
+      "Server-relative URL (path and token) that triggers a webhook task; null for timed tasks.",
+  }),
 });
 export type ScheduledTask = typeof ScheduledTask.Type;
 

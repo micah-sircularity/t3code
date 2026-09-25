@@ -28,10 +28,15 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
+
+export const SCHEDULED_TASK_WEBHOOK_PREFIX = "/hooks";
 
 const decodeTask = Schema.decodeUnknownEffect(ScheduledTask);
 const decodeTaskId = Schema.decodeUnknownOption(ScheduledTaskId);
@@ -87,6 +92,18 @@ export class ScheduledTaskService extends Context.Service<
     readonly runNow: (
       input: ScheduledTaskRunNowInput,
     ) => Effect.Effect<ScheduledTaskRunNowResult, ScheduledTaskError>;
+    /**
+     * Run a webhook task for one delivered event. Replays of the same
+     * deliveryId resolve to the same command, so duplicate deliveries do not
+     * start a second thread. Unknown ids and bad tokens both return null.
+     */
+    readonly runWebhook: (input: {
+      readonly id: ScheduledTaskId;
+      readonly token: string;
+      readonly deliveryId: string;
+      readonly source: string;
+      readonly event: string;
+    }) => Effect.Effect<ScheduledTaskRunNowResult | null, ScheduledTaskError>;
   }
 >()("t3/scheduledTasks/ScheduledTaskService") {}
 
@@ -211,6 +228,22 @@ export const layer = Layer.effect(
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const scheduler = yield* Scheduler.Scheduler;
     const activeRuns = yield* Ref.make<ReadonlySet<ScheduledTaskId>>(new Set());
+    const secretStore = yield* ServerSecretStore.ServerSecretStore;
+    const webhookKey = yield* secretStore.getOrCreateRandom("scheduled-task-webhook-key", 32);
+    const webhookToken = (id: ScheduledTaskId) =>
+      createHmac("sha256", webhookKey).update(id).digest("base64url");
+    const webhookTokenMatches = (id: ScheduledTaskId, token: string) => {
+      const expected = Buffer.from(webhookToken(id));
+      const actual = Buffer.from(token);
+      return expected.length === actual.length && timingSafeEqual(expected, actual);
+    };
+    const withWebhookPath = (task: ScheduledTask): ScheduledTask => ({
+      ...task,
+      webhookPath:
+        task.schedule.type === "webhook"
+          ? `${SCHEDULED_TASK_WEBHOOK_PREFIX}/${encodeURIComponent(task.id)}?token=${webhookToken(task.id)}`
+          : null,
+    });
     // Sliding(1) coalesces the dirty-signal: every notification triggers a
     // full list() re-emit anyway, so a slow subscriber only ever needs the
     // latest signal — an unbounded backlog would just grow memory.
@@ -457,14 +490,20 @@ export const layer = Layer.effect(
 
     const runTask = Effect.fn("ScheduledTaskService.runTask")(function* (
       task: ScheduledTask,
-      trigger: "scheduled" | "manual",
+      trigger: "scheduled" | "manual" | "webhook",
+      event?: { readonly deliveryId: string; readonly source: string; readonly text: string },
     ) {
-      const reserved = yield* Ref.modify(activeRuns, (active) => {
-        if (active.has(task.id)) return [false, active] as const;
-        const next = new Set(active);
-        next.add(task.id);
-        return [true, next] as const;
-      });
+      // Events arrive independently, so webhook runs overlap instead of
+      // queueing behind the per-task lock.
+      const reserved =
+        trigger === "webhook"
+          ? true
+          : yield* Ref.modify(activeRuns, (active) => {
+              if (active.has(task.id)) return [false, active] as const;
+              const next = new Set(active);
+              next.add(task.id);
+              return [true, next] as const;
+            });
       if (!reserved) {
         if (trigger === "manual") {
           return yield* taskError("Schedule task is already running.", { taskId: task.id });
@@ -483,7 +522,7 @@ export const layer = Layer.effect(
         if (active === null) {
           // A manual run on a just-deleted task must fail loudly, not report
           // a successful run that never dispatched.
-          if (trigger === "manual") {
+          if (trigger !== "scheduled") {
             return yield* taskError("Schedule task not found.", { taskId: task.id });
           }
           return task;
@@ -504,12 +543,18 @@ export const layer = Layer.effect(
         yield* markRunning(active.id, startedAtIso);
         yield* notifyChanged;
 
-        const fireKey = `${active.id}:${DateTime.toEpochMillis(startedAt)}:${trigger}`;
+        const fireKey =
+          event === undefined
+            ? `${active.id}:${DateTime.toEpochMillis(startedAt)}:${trigger}`
+            : `${active.id}:webhook:${event.deliveryId}`;
         const commandId = CommandId.make(`scheduled-task:${fireKey}`);
         const messageId = MessageId.make(`scheduled-task-message:${fireKey}`);
         // Dispatch from the fresh row so prompt/model/binding edits made
         // after the poll read are honoured.
-        const prompt = active.prompt;
+        const prompt =
+          event === undefined
+            ? active.prompt
+            : `${active.prompt}\n\n<webhook_event source="${event.source}" delivery="${event.deliveryId}">\n${event.text}\n</webhook_event>`;
 
         // Effect.exit (not Effect.result) so defects and interruptions in the
         // dispatch are also captured and recorded as a failed run instead of
@@ -586,11 +631,13 @@ export const layer = Layer.effect(
       }).pipe(
         Effect.onError((cause) => releaseStuckRun(task, errorMessage(cause))),
         Effect.ensuring(
-          Ref.update(activeRuns, (active) => {
-            const next = new Set(active);
-            next.delete(task.id);
-            return next;
-          }),
+          trigger === "webhook"
+            ? Effect.void
+            : Ref.update(activeRuns, (active) => {
+                const next = new Set(active);
+                next.delete(task.id);
+                return next;
+              }),
         ),
       );
     });
@@ -701,7 +748,7 @@ export const layer = Layer.effect(
 
     const list: ScheduledTaskService["Service"]["list"] = () =>
       listRows().pipe(
-        Effect.map((tasks) => ({ tasks })),
+        Effect.map((tasks) => ({ tasks: tasks.map(withWebhookPath) })),
         Effect.mapError((cause) => taskError("Could not list schedule tasks.", { cause })),
       );
 
@@ -771,7 +818,7 @@ export const layer = Layer.effect(
         };
         yield* saveTask(task, input.requireExisting === true);
         yield* notifyChanged;
-        return { task };
+        return { task: withWebhookPath(task) };
       });
 
     const setEnabled: ScheduledTaskService["Service"]["setEnabled"] = (input) =>
@@ -817,6 +864,26 @@ export const layer = Layer.effect(
         return { task: next };
       });
 
+    const runWebhook: ScheduledTaskService["Service"]["runWebhook"] = (input) =>
+      Effect.gen(function* () {
+        const task = yield* findTask(input.id);
+        if (task === null || !webhookTokenMatches(task.id, input.token)) return null;
+        if (task.schedule.type !== "webhook") return null;
+        if (!task.enabled) {
+          return yield* taskError("Webhook task is paused.", { taskId: task.id });
+        }
+        const next = yield* runTask(task, "webhook", {
+          deliveryId: input.deliveryId,
+          source: input.source,
+          text: input.event,
+        }).pipe(
+          Effect.mapError((cause) =>
+            taskError("Could not run webhook task.", { taskId: input.id, cause }),
+          ),
+        );
+        return { task: withWebhookPath(next) };
+      });
+
     return ScheduledTaskService.of({
       list,
       subscribeList,
@@ -824,6 +891,7 @@ export const layer = Layer.effect(
       setEnabled,
       delete: deleteTask,
       runNow,
+      runWebhook,
     });
   }),
 );
