@@ -1,5 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 
+import { webhookPrompt } from "./ScheduledTaskService.ts";
 import { normalizeWebhookEvent, renderWebhookEvent, webhookFilterAccepts } from "./WebhookEvent.ts";
 
 const githubPullRequest = (action: string) =>
@@ -95,5 +96,32 @@ describe("webhookFilterAccepts", () => {
     expect(
       webhookFilterAccepts({ type: "webhook", source: "basecamp" }, githubPullRequest("opened")),
     ).toBe(false);
+  });
+});
+
+describe("webhookPrompt", () => {
+  it("wraps the rendered event after the task prompt", () => {
+    const event = githubPullRequest("opened");
+    const prompt = webhookPrompt(
+      "Review this PR.",
+      "test:1",
+      event.keys[0]!,
+      renderWebhookEvent(event),
+    );
+    expect(
+      prompt.startsWith(
+        'Review this PR.\n\n<webhook_event source="pull_request.opened" delivery="test:1">',
+      ),
+    ).toBe(true);
+    expect(prompt).toContain("Title: Add checkout");
+    expect(prompt.endsWith("</webhook_event>")).toBe(true);
+  });
+
+  it("previews a skipped sample without matching", () => {
+    const event = githubPullRequest("labeled");
+    expect(webhookFilterAccepts({ type: "webhook", events: ["pull_request.opened"] }, event)).toBe(
+      false,
+    );
+    expect(event.keys[0]).toBe("pull_request.labeled");
   });
 });
