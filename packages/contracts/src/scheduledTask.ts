@@ -57,6 +57,14 @@ const ScheduledTaskFixedTimeSchedule = Schema.Struct({
 export const ScheduledTaskWebhookSource = Schema.Literals(["any", "github", "basecamp"]);
 export type ScheduledTaskWebhookSource = typeof ScheduledTaskWebhookSource.Type;
 
+export const ScheduledTaskWebhookSample = Schema.Struct({
+  headers: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({
+    description: 'Delivery headers, such as {"x-github-event": "pull_request"}.',
+  }),
+  body: Schema.String.annotate({ description: "Raw request body, usually JSON." }),
+});
+export type ScheduledTaskWebhookSample = typeof ScheduledTaskWebhookSample.Type;
+
 const ScheduledTaskWebhookSchedule = Schema.Struct({
   type: Schema.Literal("webhook").annotate({
     description: "Select webhook triggering.",
@@ -64,6 +72,9 @@ const ScheduledTaskWebhookSchedule = Schema.Struct({
   source: Schema.optional(ScheduledTaskWebhookSource).annotate({
     description:
       "Expected sender. 'github' and 'basecamp' deliveries are normalized into a summary; other senders are rejected when set.",
+  }),
+  sample: Schema.optional(ScheduledTaskWebhookSample).annotate({
+    description: "Saved example delivery used to test the filter and preview the prompt.",
   }),
   events: Schema.optional(Schema.Array(TrimmedNonEmptyString)).annotate({
     description:
@@ -200,6 +211,26 @@ export const ScheduledTaskRunNowResult = Schema.Struct({
   task: ScheduledTask,
 });
 export type ScheduledTaskRunNowResult = typeof ScheduledTaskRunNowResult.Type;
+
+export const ScheduledTaskTestWebhookInput = Schema.Struct({
+  schedule: ScheduledTaskUpsertSchedule,
+  prompt: Schema.String,
+  sample: ScheduledTaskWebhookSample,
+  taskId: Schema.optional(ScheduledTaskId),
+  run: Schema.optional(Schema.Boolean).annotate({
+    description: "Start a real run of the saved task with the sample when it matches.",
+  }),
+});
+export type ScheduledTaskTestWebhookInput = typeof ScheduledTaskTestWebhookInput.Type;
+
+export const ScheduledTaskTestWebhookResult = Schema.Struct({
+  accepted: Schema.Boolean,
+  source: Schema.String,
+  keys: Schema.Array(Schema.String),
+  renderedPrompt: Schema.String,
+  run: Schema.optional(ScheduledTask),
+});
+export type ScheduledTaskTestWebhookResult = typeof ScheduledTaskTestWebhookResult.Type;
 
 export class ScheduledTaskError extends Schema.TaggedError<ScheduledTaskError>()(
   "ScheduledTaskError",

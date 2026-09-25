@@ -298,6 +298,8 @@ import {
   ScheduledTaskListResult,
   ScheduledTaskRunNowInput,
   ScheduledTaskRunNowResult,
+  ScheduledTaskTestWebhookInput,
+  ScheduledTaskTestWebhookResult,
   ScheduledTaskSetEnabledInput,
   ScheduledTaskUpsertInput,
   ScheduledTaskMutationResult,
@@ -455,6 +457,7 @@ export const WS_METHODS = {
   scheduledTasksSetEnabled: "scheduledTasks.setEnabled",
   scheduledTasksDelete: "scheduledTasks.delete",
   scheduledTasksRunNow: "scheduledTasks.runNow",
+  scheduledTasksTestWebhook: "scheduledTasks.testWebhook",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -1603,6 +1606,12 @@ const WsScheduledTasksRunNowRpc = Rpc.make(WS_METHODS.scheduledTasksRunNow, {
   error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
 });
 
+const WsScheduledTasksTestWebhookRpc = Rpc.make(WS_METHODS.scheduledTasksTestWebhook, {
+  payload: ScheduledTaskTestWebhookInput,
+  success: ScheduledTaskTestWebhookResult,
+  error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
+});
+
 const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
   payload: Schema.Struct({}),
   success: AuthAccessStreamEvent,
@@ -1674,6 +1683,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsScheduledTasksSetEnabledRpc,
   WsScheduledTasksDeleteRpc,
   WsScheduledTasksRunNowRpc,
+  WsScheduledTasksTestWebhookRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
   WsServerGetBackgroundPolicyRpc,

@@ -11,6 +11,8 @@ import {
   type ScheduledTaskMutationResult,
   type ScheduledTaskRunNowInput,
   type ScheduledTaskRunNowResult,
+  type ScheduledTaskTestWebhookInput,
+  type ScheduledTaskTestWebhookResult,
   type ScheduledTaskSetEnabledInput,
   type ScheduledTaskUpsertInput,
 } from "@t3tools/contracts";
@@ -33,6 +35,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import {
   type NormalizedWebhookEvent,
+  normalizeWebhookEvent,
   renderWebhookEvent,
   webhookFilterAccepts,
 } from "./WebhookEvent.ts";
@@ -102,6 +105,10 @@ export class ScheduledTaskService extends Context.Service<
      * deliveryId resolve to the same command, so duplicate deliveries do not
      * start a second thread. Unknown ids and bad tokens both return null.
      */
+    /** Dry-run a sample delivery against a schedule, optionally running the saved task. */
+    readonly testWebhook: (
+      input: ScheduledTaskTestWebhookInput,
+    ) => Effect.Effect<ScheduledTaskTestWebhookResult, ScheduledTaskError>;
     readonly runWebhook: (input: {
       readonly id: ScheduledTaskId;
       readonly token: string;
@@ -120,6 +127,15 @@ function taskError(message: string, input?: { taskId?: ScheduledTaskId; cause?: 
     ...(input?.taskId === undefined ? {} : { taskId: input.taskId }),
     ...(input?.cause === undefined ? {} : { cause: input.cause }),
   });
+}
+
+export function webhookPrompt(
+  prompt: string,
+  deliveryId: string,
+  source: string,
+  text: string,
+): string {
+  return `${prompt}\n\n<webhook_event source="${source}" delivery="${deliveryId}">\n${text}\n</webhook_event>`;
 }
 
 function iso(value: DateTime.DateTime): string {
@@ -563,7 +579,7 @@ export const layer = Layer.effect(
         const prompt =
           event === undefined
             ? active.prompt
-            : `${active.prompt}\n\n<webhook_event source="${event.source}" delivery="${event.deliveryId}">\n${event.text}\n</webhook_event>`;
+            : webhookPrompt(active.prompt, event.deliveryId, event.source, event.text);
 
         // Effect.exit (not Effect.result) so defects and interruptions in the
         // dispatch are also captured and recorded as a failed run instead of
@@ -896,7 +912,55 @@ export const layer = Layer.effect(
         return { task: withWebhookPath(next), skipped: false };
       });
 
+    const testWebhook: ScheduledTaskService["Service"]["testWebhook"] = (input) =>
+      Effect.gen(function* () {
+        if (input.schedule.type !== "webhook") {
+          return yield* taskError("Only webhook tasks can be tested with a sample.");
+        }
+        const event = normalizeWebhookEvent({
+          headers: Object.fromEntries(
+            Object.entries(input.sample.headers ?? {}).map(([key, value]) => [
+              key.toLowerCase(),
+              value,
+            ]),
+          ),
+          body: input.sample.body,
+          sourceHint: input.sample.headers?.["x-webhook-source"] ?? null,
+        });
+        const accepted = webhookFilterAccepts(input.schedule, event);
+        const now = yield* localNow;
+        const deliveryId = `test:${DateTime.toEpochMillis(now)}`;
+        const source = event.keys[0] ?? event.source;
+        const result = {
+          accepted,
+          source: event.source,
+          keys: [...event.keys],
+          renderedPrompt: webhookPrompt(
+            input.prompt,
+            deliveryId,
+            source,
+            renderWebhookEvent(event),
+          ),
+        };
+        if (!input.run || !accepted) return result;
+        if (input.taskId === undefined) {
+          return yield* taskError("Save the task before running it with a sample.");
+        }
+        const task = yield* loadTask(input.taskId);
+        const next = yield* runTask(task, "webhook", {
+          deliveryId,
+          source,
+          text: renderWebhookEvent(event),
+        }).pipe(
+          Effect.mapError((cause) =>
+            taskError("Could not run webhook task.", { taskId: task.id, cause }),
+          ),
+        );
+        return { ...result, run: withWebhookPath(next) };
+      });
+
     return ScheduledTaskService.of({
+      testWebhook,
       list,
       subscribeList,
       upsert,
