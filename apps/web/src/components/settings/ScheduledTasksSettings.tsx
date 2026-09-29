@@ -42,18 +42,21 @@ import {
 import { useEnvironment, type EnvironmentPresentation } from "../../state/environments";
 import { useProjects } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";
+import { usePaginatedBranches } from "../../state/queries";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { WorktreeBaseBranchPicker } from "../WorktreeBaseBranchPicker";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { useSettingsScope } from "./SettingsScopeContext";
 import {
+  isVerificationTask,
   matchesScheduledTaskScope,
   scheduledTaskDefaultModel,
   taskToDraft,
   type DraftState,
   type WorkspaceMode,
 } from "./scheduledTasksSettings.logic";
+import { VerificationAgentFields, VerificationPath } from "./VerificationLoop";
 import { Label } from "../ui/label";
 import { Menu, MenuTrigger, MenuPopup, MenuItem, MenuSeparator } from "../ui/menu";
 import { ToggleGroup, Toggle } from "../ui/toggle-group";
@@ -108,6 +111,9 @@ const EMPTY_DRAFT: DraftState = {
   webhookEvents: "",
   webhookSampleHeaders: "",
   webhookSampleBody: "",
+  workKey: "",
+  deliverySummary: "",
+  workflowAgents: [],
   intervalMinutes: "15",
   timeOfDay: "09:00",
   weekdays: new Set([1, 2, 3, 4, 5]),
@@ -194,6 +200,40 @@ function scheduleFromDraft(draft: DraftState): ScheduledTaskSchedule {
               body: draft.webhookSampleBody,
             },
           }),
+      ...(draft.workKey.trim() === "" ? {} : { workKey: draft.workKey.trim() }),
+      ...(draft.workflowAgents.length === 0
+        ? {}
+        : {
+            agents: draft.workflowAgents.map((agent) => {
+              const modelKey = agent.modelKey || draft.modelKey;
+              const parsed = splitModelKey(modelKey);
+              const modelSelection =
+                parsed !== null &&
+                draft.baseModelSelection !== null &&
+                draft.baseModelSelection.instanceId === parsed.instanceId &&
+                draft.baseModelSelection.model === parsed.model
+                  ? draft.baseModelSelection
+                  : parsed;
+              return {
+                id: agent.id,
+                name: agent.name.trim() || "Agent",
+                prompt: agent.prompt,
+                advance: agent.advance,
+                ...(modelSelection === null ? {} : { modelSelection }),
+                route:
+                  agent.route === "auto"
+                    ? { type: "auto" as const }
+                    : {
+                        type: "environment" as const,
+                        environmentId: agent.route,
+                        ...(agent.routeLabel === "" ? {} : { label: agent.routeLabel }),
+                      },
+              };
+            }),
+          }),
+      ...(draft.deliverySummary.trim() === ""
+        ? {}
+        : { delivery: { summary: draft.deliverySummary.trim() } }),
     };
   }
   if (draft.scheduleMode === "interval") {
@@ -284,18 +324,20 @@ export function ScheduledTasksSettings(target: {
   readonly taskId?: ScheduledTaskId | undefined;
 }) {
   const { scope, environments, connectedEnvironments, environment } = useSettingsScope();
+  const [tab, setTab] = useState<"automations" | "verification">("automations");
   const [editor, setEditor] = useState<{
     environmentId: EnvironmentId;
     task: ScheduledTask | null;
+    verification: boolean;
   } | null>(null);
   const openForEdit = useCallback((environmentId: EnvironmentId, task: ScheduledTask) => {
-    setEditor({ environmentId, task });
+    setEditor({ environmentId, task, verification: isVerificationTask(task) });
   }, []);
   const defaultEnvironment = environment ?? connectedEnvironments[0];
   return (
     <SettingsPageContainer>
       <SettingsSection
-        title="Scheduled tasks"
+        title={tab === "verification" ? "Verification" : "Automations"}
         variant="plain"
         headerAction={
           <Button
@@ -304,14 +346,30 @@ export function ScheduledTasksSettings(target: {
             disabled={!defaultEnvironment}
             onClick={() =>
               defaultEnvironment &&
-              setEditor({ environmentId: defaultEnvironment.environmentId, task: null })
+              setEditor({
+                environmentId: defaultEnvironment.environmentId,
+                task: null,
+                verification: tab === "verification",
+              })
             }
           >
             <PlusIcon className="size-3" />
-            New task
+            {tab === "verification" ? "New verification" : "New task"}
           </Button>
         }
       >
+        <ToggleGroup
+          className="mb-4"
+          aria-label="Workflow kind"
+          value={[tab]}
+          onValueChange={(values) => {
+            const next = values[0];
+            if (next === "automations" || next === "verification") setTab(next);
+          }}
+        >
+          <Toggle value="automations">Automations</Toggle>
+          <Toggle value="verification">Verification</Toggle>
+        </ToggleGroup>
         {scope.kind === "unavailable" ? (
           <SettingsSection title="Unavailable selection">
             <SettingsRow title={scope.message} />
@@ -340,6 +398,7 @@ export function ScheduledTasksSettings(target: {
                     : undefined
                 }
                 onEdit={openForEdit}
+                mode={tab}
               />
             ))}
           </div>
@@ -350,6 +409,7 @@ export function ScheduledTasksSettings(target: {
           key={`${editor.environmentId}:${editor.task?.id ?? "new"}`}
           initialEnvironmentId={editor.environmentId}
           task={editor.task}
+          verification={editor.verification}
           onClose={() => setEditor(null)}
         />
       ) : null}
@@ -361,11 +421,13 @@ function ScheduledTaskEnvironmentSection({
   environment,
   showEnvironmentHeading,
   taskId,
+  mode,
   onEdit,
 }: {
   readonly environment: EnvironmentPresentation;
   readonly showEnvironmentHeading: boolean;
   readonly taskId?: ScheduledTaskId | undefined;
+  readonly mode: "automations" | "verification";
   readonly onEdit: (environmentId: EnvironmentId, task: ScheduledTask) => void;
 }) {
   const { scope } = useSettingsScope();
@@ -379,8 +441,10 @@ function ScheduledTaskEnvironmentSection({
         })
       : null,
   );
-  const tasks = tasksQuery.data?.tasks.filter((task) =>
-    matchesScheduledTaskScope(scope, environment.environmentId, task.projectId),
+  const tasks = tasksQuery.data?.tasks.filter(
+    (task) =>
+      matchesScheduledTaskScope(scope, environment.environmentId, task.projectId) &&
+      (mode === "verification" ? isVerificationTask(task) : !isVerificationTask(task)),
   );
   const linkedTask = tasks?.find((task) => task.id === taskId);
   const openedLink = useRef(false);
@@ -427,12 +491,35 @@ function ScheduledTaskEnvironmentSection({
             />
           ) : (
             tasks.map((task) => (
-              <ScheduledTaskRow
-                key={task.id}
-                environmentId={environment.environmentId}
-                task={task}
-                onEdit={() => onEdit(environment.environmentId, task)}
-              />
+              <div key={task.id} className="flex flex-col gap-2">
+                {mode === "verification" && task.schedule.type === "webhook" ? (
+                  <VerificationPath
+                    trigger={task.schedule.events?.join(", ") || "Any event"}
+                    agents={(task.schedule.agents ?? []).map((agent) => ({
+                      id: agent.id,
+                      name: agent.name,
+                      prompt: agent.prompt,
+                      modelKey: agent.modelSelection
+                        ? `${agent.modelSelection.instanceId}:${agent.modelSelection.model}`
+                        : "",
+                      route:
+                        agent.route?.type === "environment" ? agent.route.environmentId : "auto",
+                      routeLabel:
+                        agent.route?.type === "environment"
+                          ? (agent.route.label ?? agent.route.environmentId)
+                          : "Auto balance",
+                      advance: agent.advance ?? "wait",
+                    }))}
+                    delivery={task.schedule.delivery?.summary ?? ""}
+                    {...(task.workflowRun === undefined ? {} : { run: task.workflowRun })}
+                  />
+                ) : null}
+                <ScheduledTaskRow
+                  environmentId={environment.environmentId}
+                  task={task}
+                  onEdit={() => onEdit(environment.environmentId, task)}
+                />
+              </div>
             ))
           )}
         </>
@@ -552,10 +639,12 @@ function ScheduledTaskRow({
 function ScheduledTaskEditorDialog({
   initialEnvironmentId,
   task,
+  verification,
   onClose,
 }: {
   readonly initialEnvironmentId: EnvironmentId;
   readonly task: ScheduledTask | null;
+  readonly verification: boolean;
   readonly onClose: () => void;
 }) {
   const { scope, connectedEnvironments } = useSettingsScope();
@@ -589,9 +678,28 @@ function ScheduledTaskEditorDialog({
       ),
     [providers, settings],
   );
-  const [draft, setDraft] = useState<DraftState>(() =>
-    task ? taskToDraft(task) : { ...EMPTY_DRAFT, projectId: projects[0]?.id ?? "" },
-  );
+  const [draft, setDraft] = useState<DraftState>(() => {
+    if (task) return taskToDraft(task);
+    const created = { ...EMPTY_DRAFT, projectId: projects[0]?.id ?? "" };
+    if (!verification) return created;
+    return {
+      ...created,
+      scheduleMode: "webhook",
+      title: "Verification",
+      prompt: "Run the verification loop.",
+      workflowAgents: [
+        {
+          id: `agent-${Date.now().toString(36)}`,
+          name: "Review",
+          prompt: "",
+          modelKey: "",
+          route: "auto",
+          routeLabel: "Auto balance",
+          advance: "wait",
+        },
+      ],
+    };
+  });
   const [saving, setSaving] = useState(false);
   const submissionPending = useRef(false);
   const editingTaskMissing =
@@ -600,6 +708,23 @@ function ScheduledTaskEditorDialog({
     !tasksQuery.data.tasks.some((entry) => entry.id === draft.editingId);
   const selectedProjectId = draft.projectId || projects[0]?.id || "";
   const selectedProject = projects.find((project) => project.id === selectedProjectId);
+  const defaultBranches = usePaginatedBranches({
+    environmentId,
+    cwd: selectedProject?.workspaceRoot ?? null,
+    query: "",
+  });
+  const defaultBranchName =
+    defaultBranches.refs.find((ref) => ref.isDefault)?.name.replace(/^origin\//, "") ?? null;
+  const baseRefApplied = useRef(task !== null);
+  useEffect(() => {
+    if (baseRefApplied.current || defaultBranchName === null || defaultBranchName === "") return;
+    setDraft((current) =>
+      current.workspaceMode === "worktree" && current.baseRef === "main"
+        ? { ...current, baseRef: defaultBranchName }
+        : current,
+    );
+    baseRefApplied.current = true;
+  }, [defaultBranchName]);
 
   // The real model picker is keyed by a `${instanceId}:${model}` string, which
   // is exactly how the draft stores its selection.
@@ -875,32 +1000,36 @@ function ScheduledTaskEditorDialog({
               </Field>
             ) : null}
 
-            <Field label="Prompt" htmlFor="scheduled-task-prompt">
-              <ScheduledTaskPromptEditor
-                value={draft.prompt}
-                skills={activeSkills}
-                provider={activeInstanceEntry?.driverKind ?? ("codex" as ProviderDriverKind)}
-                disabled={saving || !connected}
-                placeholder="What should the agent do each time this runs? Type $ to add a skill."
-                onChange={(prompt) => setDraft((current) => ({ ...current, prompt }))}
-              />
-            </Field>
+            {draft.workflowAgents.length > 0 ? null : (
+              <>
+                <Field label="Prompt" htmlFor="scheduled-task-prompt">
+                  <ScheduledTaskPromptEditor
+                    value={draft.prompt}
+                    skills={activeSkills}
+                    provider={activeInstanceEntry?.driverKind ?? ("codex" as ProviderDriverKind)}
+                    disabled={saving || !connected}
+                    placeholder="What should the agent do each time this runs? Type $ to add a skill."
+                    onChange={(prompt) => setDraft((current) => ({ ...current, prompt }))}
+                  />
+                </Field>
 
-            <Field label="Model">
-              <ProviderModelPicker
-                disabled={saving || !connected}
-                activeInstanceId={activeInstanceId}
-                model={activeModel}
-                lockedProvider={null}
-                instanceEntries={instanceEntries}
-                modelOptionsByInstance={modelOptionsByInstance}
-                isComposerOwned={false}
-                triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                onInstanceModelChange={(instanceId, model) =>
-                  setDraft((current) => ({ ...current, modelKey: `${instanceId}:${model}` }))
-                }
-              />
-            </Field>
+                <Field label="Model">
+                  <ProviderModelPicker
+                    disabled={saving || !connected}
+                    activeInstanceId={activeInstanceId}
+                    model={activeModel}
+                    lockedProvider={null}
+                    instanceEntries={instanceEntries}
+                    modelOptionsByInstance={modelOptionsByInstance}
+                    isComposerOwned={false}
+                    triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                    onInstanceModelChange={(instanceId, model) =>
+                      setDraft((current) => ({ ...current, modelKey: `${instanceId}:${model}` }))
+                    }
+                  />
+                </Field>
+              </>
+            )}
 
             <div className="space-y-3">
               {task?.schedule.type === "interval" &&
@@ -993,6 +1122,28 @@ function ScheduledTaskEditorDialog({
                       }))
                     }
                   />
+                  {draft.workflowAgents.length > 0 ? (
+                    <VerificationAgentFields
+                      agents={draft.workflowAgents}
+                      workKey={draft.workKey}
+                      deliverySummary={draft.deliverySummary}
+                      environments={connectedEnvironments.map((entry) => ({
+                        id: entry.environmentId,
+                        label: entry.label,
+                      }))}
+                      fallbackEnvironmentId={environmentId}
+                      triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                      disabled={saving || !connected}
+                      onChange={({ agents, workKey, deliverySummary }) =>
+                        setDraft((current) => ({
+                          ...current,
+                          workflowAgents: agents,
+                          workKey,
+                          deliverySummary,
+                        }))
+                      }
+                    />
+                  ) : null}
                 </>
               ) : (
                 <div className="flex items-center gap-2">

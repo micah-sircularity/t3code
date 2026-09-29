@@ -18,6 +18,10 @@ import type { ProviderInstanceEntry } from "../../providerInstances";
 
 import type { ResolvedSettingsScope } from "./settingsScope";
 
+export function isVerificationTask(task: ScheduledTask): boolean {
+  return task.schedule.type === "webhook" && (task.schedule.agents?.length ?? 0) > 0;
+}
+
 /** Project IDs belong to an environment, including when a grouped project spans machines. */
 export function matchesScheduledTaskScope(
   scope: ResolvedSettingsScope,
@@ -47,6 +51,18 @@ export function validateScheduledTasksSearch(raw: Record<string, unknown>) {
 type ScheduleMode = "fixed" | "interval" | "webhook";
 export type WorkspaceMode = "root" | "worktree" | "existing_worktree";
 
+export interface WorkflowAgentDraft {
+  readonly id: string;
+  readonly name: string;
+  readonly prompt: string;
+  /** "auto" or an environment id. */
+  readonly route: string;
+  readonly routeLabel: string;
+  readonly advance: "continue" | "wait";
+  /** Empty uses the task model. Otherwise `instanceId:model`. */
+  readonly modelKey: string;
+}
+
 export interface DraftState {
   readonly editingId: string | null;
   readonly title: string;
@@ -59,6 +75,10 @@ export interface DraftState {
   /** Sample delivery headers as JSON text; empty for none. */
   readonly webhookSampleHeaders: string;
   readonly webhookSampleBody: string;
+  /** Dot path that keeps later events on the same piece of work. */
+  readonly workKey: string;
+  readonly deliverySummary: string;
+  readonly workflowAgents: ReadonlyArray<WorkflowAgentDraft>;
   readonly intervalMinutes: string;
   readonly timeOfDay: string;
   readonly weekdays: ReadonlySet<number>;
@@ -100,6 +120,25 @@ export function taskToDraft(task: ScheduledTask): DraftState {
         ? JSON.stringify(schedule.sample.headers, null, 2)
         : "",
     webhookSampleBody: schedule.type === "webhook" ? (schedule.sample?.body ?? "") : "",
+    workKey: schedule.type === "webhook" ? (schedule.workKey ?? "") : "",
+    deliverySummary: schedule.type === "webhook" ? (schedule.delivery?.summary ?? "") : "",
+    workflowAgents:
+      schedule.type === "webhook"
+        ? (schedule.agents ?? []).map((agent) => ({
+            id: agent.id,
+            name: agent.name,
+            prompt: agent.prompt,
+            route: agent.route?.type === "environment" ? agent.route.environmentId : "auto",
+            routeLabel:
+              agent.route?.type === "environment"
+                ? (agent.route.label ?? agent.route.environmentId)
+                : "Auto balance",
+            advance: agent.advance ?? "wait",
+            modelKey: agent.modelSelection
+              ? `${agent.modelSelection.instanceId}:${agent.modelSelection.model}`
+              : "",
+          }))
+        : [],
     intervalMinutes:
       schedule.type === "interval" ? String(Math.max(1, schedule.everyMs / 60_000)) : "15",
     timeOfDay: schedule.type === "fixed_time" ? schedule.timeOfDay : "09:00",

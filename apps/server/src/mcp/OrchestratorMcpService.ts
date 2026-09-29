@@ -14,6 +14,8 @@ import {
   type OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpCreateThreadsInput,
   type OrchestratorMcpCreateThreadsResult,
+  type OrchestratorMcpCreateWorkflowInput,
+  type OrchestratorMcpCreateWorkflowResult,
   type OrchestratorMcpCreatedThread,
   type OrchestratorMcpDelegateTaskInput,
   type OrchestratorMcpDelegateTaskResult,
@@ -119,6 +121,10 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpScheduleTaskInput,
   ) => Effect.Effect<OrchestratorMcpScheduleTaskResult, OrchestratorMcpFailure>;
+  readonly createWorkflow: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpCreateWorkflowInput,
+  ) => Effect.Effect<OrchestratorMcpCreateWorkflowResult, OrchestratorMcpFailure>;
   readonly listScheduledTasks: (
     scope: McpInvocationScope,
   ) => Effect.Effect<OrchestratorMcpListScheduledTasksResult, OrchestratorMcpFailure>;
@@ -1233,6 +1239,94 @@ const make = Effect.gen(function* () {
             ),
           );
         return scheduledTaskSummary(task);
+      }),
+    createWorkflow: (scope, input) =>
+      Effect.gen(function* () {
+        yield* requireCapability(scope);
+        const parent = yield* loadProjection(scope.threadId);
+        if (
+          input.kind === "automation" &&
+          (input.prompt === undefined || input.prompt.trim() === "")
+        ) {
+          return yield* failure("invalid_request", "An automation requires a prompt.");
+        }
+        if (input.kind === "verification") {
+          if (input.agents === undefined || input.agents.length === 0) {
+            return yield* failure("invalid_request", "A verification requires at least one agent.");
+          }
+          if (input.workKey === undefined || input.workKey.trim() === "") {
+            return yield* failure(
+              "invalid_request",
+              "A verification requires workKey, a dot path such as issue.id.",
+            );
+          }
+        }
+        const agents =
+          input.kind === "verification"
+            ? (input.agents ?? []).map((agent, index) => ({
+                id: `step-${index + 1}`,
+                name: agent.name,
+                prompt: agent.prompt,
+                ...(agent.modelSelection === undefined
+                  ? {}
+                  : { modelSelection: agent.modelSelection }),
+                route: agent.route ?? { type: "auto" as const },
+                advance: agent.advance ?? ("wait" as const),
+              }))
+            : [];
+        const prompt =
+          input.kind === "automation" ? input.prompt! : (agents[0]?.prompt ?? input.prompt ?? "");
+        const title =
+          input.title ?? (input.kind === "verification" ? "Verification" : "Automation");
+        const source =
+          input.source === undefined || input.source === "any" ? undefined : input.source;
+        const upsertInput: ScheduledTaskUpsertInput = {
+          title,
+          prompt,
+          enabled: true,
+          schedule: {
+            type: "webhook",
+            ...(source === undefined ? {} : { source }),
+            ...(input.events === undefined || input.events.length === 0
+              ? {}
+              : { events: input.events }),
+            ...(input.workKey === undefined || input.workKey.trim() === ""
+              ? {}
+              : { workKey: input.workKey.trim() }),
+            ...(agents.length === 0 ? {} : { agents }),
+            ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
+          },
+          projectId: parent.thread.projectId,
+          threadId: null,
+          workspaceStrategy: scheduledTaskWorkspaceStrategy(false),
+          modelSelection: parent.thread.modelSelection,
+          runtimeMode: parent.thread.runtimeMode,
+          interactionMode: parent.thread.interactionMode,
+          createdBy: "agent",
+          creationSource: "mcp",
+          ...(input.clientRequestId === undefined
+            ? {}
+            : {
+                commandId: stableCommandId({
+                  scope,
+                  requestKey: input.clientRequestId,
+                  operation: "create-workflow",
+                }),
+              }),
+        };
+        const { task } = yield* scheduledTasks
+          .upsert(upsertInput)
+          .pipe(
+            Effect.mapError((error) =>
+              failure("orchestration_error", `Could not create workflow: ${error.message}`),
+            ),
+          );
+        return {
+          scheduledTaskId: task.id,
+          title: task.title,
+          kind: input.kind,
+          webhookPath: task.webhookPath ?? null,
+        };
       }),
     listScheduledTasks: (scope) =>
       Effect.gen(function* () {

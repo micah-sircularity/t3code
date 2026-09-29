@@ -2,6 +2,8 @@ import {
   OrchestratorMcpCapabilitiesResult,
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpCreateThreadsResult,
+  OrchestratorMcpCreateWorkflowInput,
+  OrchestratorMcpCreateWorkflowResult,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpDeleteScheduledTaskInput,
@@ -90,6 +92,19 @@ const TaskCancelTool = Tool.make("task_cancel", {
 })
   .annotate(Tool.Title, "Cancel delegated task")
   .annotate(Tool.Destructive, true);
+
+export const CreateWorkflowTool = Tool.make("create_workflow", {
+  description:
+    "Create a webhook workflow on this project. kind='automation' is one prompt and no agents. kind='verification' is an ordered agent loop: each agent has name, prompt, optional modelSelection, route ({type:'auto'} by default, or {type:'environment', environmentId, label}), and advance ('wait' for a later event, or 'continue' when the agent finishes). A verification requires workKey, a dot path such as issue.id. Each verification prompt must end with VERIFIED or STOP. Do not bind the run to this thread. Use schedule_task for timers. When a step needs a page, use the T3 browser preview_* tools. Report the returned webhookPath.",
+  parameters: OrchestratorMcpCreateWorkflowInput,
+  success: OrchestratorMcpCreateWorkflowResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Create a webhook workflow")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
 
 export const ScheduleTaskTool = Tool.make("schedule_task", {
   description:
@@ -239,6 +254,7 @@ export const OrchestratorToolkit = Toolkit.make(
   DelegateTaskTool,
   TaskStatusTool,
   TaskCancelTool,
+  CreateWorkflowTool,
   ScheduleTaskTool,
   ListScheduledTasksTool,
   UpdateScheduledTaskTool,

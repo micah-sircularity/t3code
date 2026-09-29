@@ -30,6 +30,12 @@ const handlers = {
       const service = yield* OrchestratorMcpService;
       return yield* service.cancelTask(scope, input);
     }),
+  create_workflow: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext;
+      const service = yield* OrchestratorMcpService;
+      return yield* service.createWorkflow(scope, input);
+    }),
   schedule_task: (input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext;
