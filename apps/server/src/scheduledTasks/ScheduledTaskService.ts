@@ -14,6 +14,9 @@ import {
   type ScheduledTaskTestWebhookInput,
   type ScheduledTaskTestWebhookResult,
   type ScheduledTaskSetEnabledInput,
+  type WorkflowAgent,
+  type WorkflowRunStatus,
+  type WorkflowRunView,
   type ScheduledTaskUpsertInput,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -44,7 +47,14 @@ import {
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
+import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
+import {
+  nextWorkflowStatus,
+  routeLabel,
+  verdictFromText,
+  workIdFromPayload,
+} from "./WorkflowRun.ts";
 
 export const SCHEDULED_TASK_WEBHOOK_PREFIX = "/hooks";
 
@@ -117,7 +127,11 @@ export class ScheduledTaskService extends Context.Service<
       readonly deliveryId: string;
       readonly event: NormalizedWebhookEvent;
     }) => Effect.Effect<
-      (ScheduledTaskRunNowResult & { readonly skipped: boolean }) | null,
+      | (ScheduledTaskRunNowResult & {
+          readonly skipped: boolean;
+          readonly reason: "ran" | "filter" | "busy" | "waiting";
+        })
+      | null,
       ScheduledTaskError
     >;
   }
@@ -253,6 +267,13 @@ export const layer = Layer.effect(
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const scheduler = yield* Scheduler.Scheduler;
     const activeRuns = yield* Ref.make<ReadonlySet<ScheduledTaskId>>(new Set());
+    const maxWebhookLaunches = Math.max(
+      1,
+      Number(process.env.T3CODE_WEBHOOK_MAX_CONCURRENT ?? "1") || 1,
+    );
+    const webhookLaunches = yield* Ref.make(0);
+    const launchedThreadId = yield* Ref.make<string | null>(null);
+    const hostResources = yield* Effect.serviceOption(HostResources.HostResources);
     const secretStore = yield* Effect.serviceOption(ServerSecretStore.ServerSecretStore);
     const webhookKey = Option.isSome(secretStore)
       ? yield* secretStore.value.getOrCreateRandom("scheduled-task-webhook-key", 32)
@@ -537,7 +558,15 @@ export const layer = Layer.effect(
     const runTask = Effect.fn("ScheduledTaskService.runTask")(function* (
       task: ScheduledTask,
       trigger: "scheduled" | "manual" | "webhook",
-      event?: { readonly deliveryId: string; readonly source: string; readonly text: string },
+      event?: {
+        readonly deliveryId: string;
+        readonly source: string;
+        readonly text: string;
+        readonly prompt?: string;
+        readonly title?: string;
+        readonly agentIndex?: number;
+        readonly modelSelection?: ScheduledTask["modelSelection"];
+      },
     ) {
       // Events arrive independently, so webhook runs overlap instead of
       // queueing behind the per-task lock.
@@ -592,15 +621,18 @@ export const layer = Layer.effect(
         const fireKey =
           event === undefined
             ? `${active.id}:${DateTime.toEpochMillis(startedAt)}:${trigger}`
-            : `${active.id}:webhook:${event.deliveryId}`;
+            : `${active.id}:webhook:${event.deliveryId}:${event.agentIndex ?? 0}`;
         const commandId = CommandId.make(`scheduled-task:${fireKey}`);
         const messageId = MessageId.make(`scheduled-task-message:${fireKey}`);
         // Dispatch from the fresh row so prompt/model/binding edits made
-        // after the poll read are honoured.
+        // after the poll read are honoured. A verification agent can replace
+        // the task prompt for this launch only.
+        const modelSelection = event?.modelSelection ?? active.modelSelection;
+        const promptText = event?.prompt ?? active.prompt;
         const prompt =
           event === undefined
-            ? active.prompt
-            : webhookPrompt(active.prompt, event.deliveryId, event.source, event.text);
+            ? promptText
+            : webhookPrompt(promptText, event.deliveryId, event.source, event.text);
 
         // Effect.exit (not Effect.result) so defects and interruptions in the
         // dispatch are also captured and recorded as a failed run instead of
@@ -611,8 +643,8 @@ export const layer = Layer.effect(
                 threadLaunch.launch({
                   commandId,
                   projectId: active.projectId,
-                  title: active.title,
-                  modelSelection: active.modelSelection,
+                  title: event?.title ?? active.title,
+                  modelSelection,
                   runtimeMode: active.runtimeMode,
                   interactionMode: active.interactionMode,
                   workspaceStrategy: active.workspaceStrategy,
@@ -635,12 +667,16 @@ export const layer = Layer.effect(
                   scheduledTaskId: active.id,
                   text: prompt,
                   attachments: [],
-                  modelSelection: active.modelSelection,
+                  modelSelection,
                   mode: "auto",
                   createdBy: active.createdBy,
                   creationSource: active.creationSource,
                 }),
               );
+
+        if (result._tag === "Success" && trigger === "webhook" && "threadId" in result.value) {
+          yield* Ref.set(launchedThreadId, String(result.value.threadId));
+        }
 
         const completedAt = yield* localNow;
         const runSucceeded = result._tag === "Success";
@@ -713,6 +749,105 @@ export const layer = Layer.effect(
       yield* notifyChanged;
     });
 
+    type WorkflowRow = {
+      readonly run_key: string;
+      readonly task_id: string;
+      readonly work_id: string;
+      readonly agent_index: number;
+      readonly status: string;
+      readonly thread_id: string | null;
+      readonly last_delivery_id: string | null;
+      readonly detail: string | null;
+      readonly route_label: string | null;
+    };
+
+    const workflowRunKey = (taskId: string, workId: string) => `${taskId}\u0000${workId}`;
+
+    const readWorkflowRun = (taskId: string, workId: string) =>
+      sql<WorkflowRow>`
+        SELECT run_key, task_id, work_id, agent_index, status, thread_id, last_delivery_id, detail, route_label
+        FROM workflow_runs
+        WHERE run_key = ${workflowRunKey(taskId, workId)}
+      `.pipe(Effect.map((rows) => rows[0] ?? null));
+
+    const writeWorkflowRun = (row: {
+      readonly taskId: string;
+      readonly workId: string;
+      readonly agentIndex: number;
+      readonly status: WorkflowRunStatus;
+      readonly threadId: string | null;
+      readonly deliveryId: string;
+      readonly detail: string | null;
+      readonly routeLabel: string | null;
+      readonly updatedAt: string;
+    }) =>
+      sql`
+        INSERT INTO workflow_runs (
+          run_key, task_id, work_id, agent_index, status, thread_id, last_delivery_id, detail, route_label, updated_at
+        ) VALUES (
+          ${workflowRunKey(row.taskId, row.workId)},
+          ${row.taskId},
+          ${row.workId},
+          ${row.agentIndex},
+          ${row.status},
+          ${row.threadId},
+          ${row.deliveryId},
+          ${row.detail},
+          ${row.routeLabel},
+          ${row.updatedAt}
+        )
+        ON CONFLICT (run_key) DO UPDATE SET
+          agent_index = excluded.agent_index,
+          status = excluded.status,
+          thread_id = excluded.thread_id,
+          last_delivery_id = excluded.last_delivery_id,
+          detail = excluded.detail,
+          route_label = excluded.route_label,
+          updated_at = excluded.updated_at
+      `;
+
+    const localMachineBusy = Effect.fn("ScheduledTaskService.localMachineBusy")(function* () {
+      if (Option.isNone(hostResources)) return false;
+      const snapshot = yield* hostResources.value.read.pipe(Effect.orElseSucceed(() => null));
+      if (snapshot === null) return false;
+      const memoryFull =
+        snapshot.totalMemoryBytes > 0 &&
+        snapshot.availableMemoryBytes / snapshot.totalMemoryBytes <= 0.05;
+      const cpuFull = snapshot.cpuUtilization !== null && snapshot.cpuUtilization >= 0.95;
+      return memoryFull || cpuFull;
+    });
+
+    const acquireWebhookSlot = () =>
+      Ref.modify(webhookLaunches, (count) =>
+        count >= maxWebhookLaunches ? ([false, count] as const) : ([true, count + 1] as const),
+      );
+    const releaseWebhookSlot = () => Ref.update(webhookLaunches, (count) => Math.max(0, count - 1));
+
+    const launchWorkflowAgent = (
+      task: ScheduledTask,
+      agent: WorkflowAgent,
+      agentIndex: number,
+      event: { readonly deliveryId: string; readonly source: string; readonly text: string },
+    ) =>
+      Effect.gen(function* () {
+        if (yield* localMachineBusy()) return { launched: false as const };
+        if (!(yield* acquireWebhookSlot())) return { launched: false as const };
+        yield* Ref.set(launchedThreadId, null);
+        const prompt = `${agent.prompt}\n\nEnd your last line with VERIFIED if the next step should run, or STOP if it should not.`;
+        const launched = yield* runTask(task, "webhook", {
+          ...event,
+          prompt,
+          title: `${task.title} · ${agent.name}`,
+          agentIndex,
+          ...(agent.modelSelection === undefined ? {} : { modelSelection: agent.modelSelection }),
+        }).pipe(Effect.ensuring(releaseWebhookSlot()));
+        return {
+          launched: true as const,
+          task: launched,
+          threadId: yield* Ref.get(launchedThreadId),
+        };
+      });
+
     const runDueTasks = Effect.fn("ScheduledTaskService.runDueTasks")(function* () {
       const now = yield* localNow;
       const tasks = yield* listDueTasks(now).pipe(
@@ -733,6 +868,11 @@ export const layer = Layer.effect(
             ),
           ),
         { concurrency: 1, discard: true },
+      );
+      yield* advanceContinuingWorkflows().pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Could not advance verification runs", { cause }),
+        ),
       );
     });
 
@@ -790,13 +930,151 @@ export const layer = Layer.effect(
       ),
     );
 
+    const workflowView = (row: WorkflowRow): WorkflowRunView | null => {
+      if (
+        row.status !== "running" &&
+        row.status !== "waiting" &&
+        row.status !== "verified" &&
+        row.status !== "stopped" &&
+        row.status !== "delivered"
+      ) {
+        return null;
+      }
+      return {
+        workId: row.work_id,
+        agentIndex: row.agent_index,
+        status: row.status,
+        detail: row.detail,
+        routeLabel: row.route_label,
+      };
+    };
+
+    const latestWorkflowRuns = Effect.fn("ScheduledTaskService.latestWorkflowRuns")(function* () {
+      const rows = yield* sql<WorkflowRow>`
+        SELECT run_key, task_id, work_id, agent_index, status, thread_id, last_delivery_id, detail, route_label
+        FROM workflow_runs
+        ORDER BY updated_at DESC
+      `;
+      const byTask = new Map<string, WorkflowRunView>();
+      for (const row of rows) {
+        if (byTask.has(row.task_id)) continue;
+        const view = workflowView(row);
+        if (view !== null) byTask.set(row.task_id, view);
+      }
+      return byTask;
+    });
+
+    const advanceContinuingWorkflows = Effect.fn("ScheduledTaskService.advanceContinuingWorkflows")(
+      function* () {
+        const rows = yield* sql<WorkflowRow>`
+        SELECT run_key, task_id, work_id, agent_index, status, thread_id, last_delivery_id, detail, route_label
+        FROM workflow_runs
+        WHERE status = 'running' AND thread_id IS NOT NULL
+      `;
+        yield* Effect.forEach(
+          rows,
+          (row) =>
+            Effect.gen(function* () {
+              if (row.thread_id === null) return;
+              const messages = yield* sql<{
+                readonly role: string;
+                readonly text: string;
+                readonly is_streaming: number;
+              }>`
+              SELECT role, text, is_streaming
+              FROM projection_thread_messages
+              WHERE thread_id = ${row.thread_id}
+              ORDER BY created_at DESC
+              LIMIT 1
+            `;
+              const latest = messages[0];
+              if (
+                latest === undefined ||
+                latest.role !== "assistant" ||
+                latest.is_streaming !== 0
+              ) {
+                return;
+              }
+              const task = yield* findTask(ScheduledTaskId.make(row.task_id));
+              if (task === null || task.schedule.type !== "webhook") return;
+              const agents = task.schedule.agents ?? [];
+              const agent = agents[row.agent_index];
+              if (agent === undefined) return;
+              const verdict = verdictFromText(latest.text);
+              const advance = agent.advance ?? "wait";
+              const status = nextWorkflowStatus({
+                agentIndex: row.agent_index,
+                agentCount: agents.length,
+                advance,
+                verdict,
+              });
+              const now = iso(yield* localNow);
+              if (status !== "verified") {
+                yield* writeWorkflowRun({
+                  taskId: row.task_id,
+                  workId: row.work_id,
+                  agentIndex: row.agent_index,
+                  status,
+                  threadId: row.thread_id,
+                  deliveryId: row.last_delivery_id ?? "",
+                  detail:
+                    verdict === "stopped"
+                      ? "Stopped"
+                      : status === "delivered"
+                        ? "Delivered"
+                        : "Waiting for a later event",
+                  routeLabel: row.route_label,
+                  updatedAt: now,
+                });
+                yield* notifyChanged;
+                return;
+              }
+              const nextAgent = agents[row.agent_index + 1];
+              if (nextAgent === undefined) return;
+              const launch = yield* launchWorkflowAgent(task, nextAgent, row.agent_index + 1, {
+                deliveryId: `${row.last_delivery_id ?? row.work_id}:next`,
+                source: "workflow",
+                text: latest.text,
+              });
+              if (!launch.launched) return;
+              yield* writeWorkflowRun({
+                taskId: row.task_id,
+                workId: row.work_id,
+                agentIndex: row.agent_index + 1,
+                status: launch.task.lastRunStatus === "failed" ? "stopped" : "running",
+                threadId: launch.threadId,
+                deliveryId: row.last_delivery_id ?? "",
+                detail: launch.task.lastRunError,
+                routeLabel: routeLabel(nextAgent),
+                updatedAt: iso(yield* localNow),
+              });
+              yield* notifyChanged;
+            }).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Could not advance one verification run", {
+                  runKey: row.run_key,
+                  cause,
+                }),
+              ),
+            ),
+          { concurrency: 1, discard: true },
+        );
+      },
+    );
+
     yield* scheduler.register("scheduled-tasks", runDueTasks());
 
     const list: ScheduledTaskService["Service"]["list"] = () =>
-      listRows().pipe(
-        Effect.map((tasks) => ({ tasks: tasks.map(withWebhookPath) })),
-        Effect.mapError((cause) => taskError("Could not list schedule tasks.", { cause })),
-      );
+      Effect.gen(function* () {
+        const tasks = yield* listRows();
+        const runs = yield* latestWorkflowRuns().pipe(Effect.orElseSucceed(() => new Map()));
+        return {
+          tasks: tasks.map((task) => ({
+            ...withWebhookPath(task),
+            workflowRun: runs.get(task.id) ?? null,
+          })),
+        };
+      }).pipe(Effect.mapError((cause) => taskError("Could not list schedule tasks.", { cause })));
 
     const subscribeList: ScheduledTaskService["Service"]["subscribeList"] = () =>
       Stream.unwrap(
@@ -919,19 +1197,107 @@ export const layer = Layer.effect(
           return yield* taskError("Webhook task is paused.", { taskId: task.id });
         }
         if (!webhookFilterAccepts(task.schedule, input.event)) {
-          return { task: withWebhookPath(task), skipped: true };
+          return { task: withWebhookPath(task), skipped: true, reason: "filter" as const };
         }
-        const next = yield* runTask(task, "webhook", {
+        const agents = task.schedule.agents ?? [];
+        const eventText = renderWebhookEvent(input.event);
+        const source = input.event.keys[0] ?? input.event.source;
+        if (agents.length === 0) {
+          if ((yield* localMachineBusy()) || !(yield* acquireWebhookSlot())) {
+            return { task: withWebhookPath(task), skipped: true, reason: "busy" as const };
+          }
+          const next = yield* runTask(task, "webhook", {
+            deliveryId: input.deliveryId,
+            source,
+            text: eventText,
+          }).pipe(
+            Effect.ensuring(releaseWebhookSlot()),
+            Effect.mapError((cause) =>
+              taskError("Could not run webhook task.", { taskId: input.id, cause }),
+            ),
+          );
+          return { task: withWebhookPath(next), skipped: false, reason: "ran" as const };
+        }
+        const workId =
+          workIdFromPayload(input.event.raw, task.schedule.workKey) ??
+          workIdFromPayload(input.event.raw, "pull_request.number") ??
+          workIdFromPayload(input.event.raw, "issue.id") ??
+          input.deliveryId;
+        const current = yield* readWorkflowRun(task.id, workId);
+        if (current?.last_delivery_id === input.deliveryId) {
+          return { task: withWebhookPath(task), skipped: true, reason: "waiting" as const };
+        }
+        if (current?.status === "running") {
+          return { task: withWebhookPath(task), skipped: true, reason: "busy" as const };
+        }
+        const agentIndex =
+          current === null || current.status === "delivered" || current.status === "stopped"
+            ? 0
+            : current.status === "waiting"
+              ? current.agent_index + 1
+              : current.agent_index;
+        const agent = agents[agentIndex];
+        if (agent === undefined) {
+          const now = iso(yield* localNow);
+          yield* writeWorkflowRun({
+            taskId: task.id,
+            workId,
+            agentIndex: agents.length - 1,
+            status: "delivered",
+            threadId: current?.thread_id ?? null,
+            deliveryId: input.deliveryId,
+            detail: task.schedule.delivery?.summary ?? "Delivered",
+            routeLabel: current?.route_label ?? null,
+            updatedAt: now,
+          });
+          return { task: withWebhookPath(task), skipped: true, reason: "waiting" as const };
+        }
+        const launch = yield* launchWorkflowAgent(task, agent, agentIndex, {
           deliveryId: input.deliveryId,
-          source: input.event.keys[0] ?? input.event.source,
-          text: renderWebhookEvent(input.event),
+          source,
+          text: eventText,
         }).pipe(
           Effect.mapError((cause) =>
             taskError("Could not run webhook task.", { taskId: input.id, cause }),
           ),
         );
-        return { task: withWebhookPath(next), skipped: false };
-      });
+        if (!launch.launched) {
+          return { task: withWebhookPath(task), skipped: true, reason: "busy" as const };
+        }
+        const now = iso(yield* localNow);
+        const failed = launch.task.lastRunStatus === "failed";
+        yield* writeWorkflowRun({
+          taskId: task.id,
+          workId,
+          agentIndex,
+          status: failed ? "stopped" : "running",
+          threadId: launch.threadId,
+          deliveryId: input.deliveryId,
+          detail: failed ? launch.task.lastRunError : routeLabel(agent),
+          routeLabel: routeLabel(agent),
+          updatedAt: now,
+        });
+        yield* notifyChanged;
+        const workflowRun: WorkflowRunView = {
+          workId,
+          agentIndex,
+          status: failed ? "stopped" : "running",
+          detail: failed ? launch.task.lastRunError : routeLabel(agent),
+          routeLabel: routeLabel(agent),
+        };
+        const taskResult: ScheduledTask = { ...withWebhookPath(launch.task), workflowRun };
+        return { task: taskResult, skipped: false, reason: "ran" as const };
+      }).pipe(
+        Effect.mapError((cause) =>
+          Schema.is(ScheduledTaskError)(cause)
+            ? cause
+            : new ScheduledTaskError({
+                message: "Could not run webhook task.",
+                taskId: input.id,
+                cause,
+              }),
+        ),
+      );
 
     const testWebhook: ScheduledTaskService["Service"]["testWebhook"] = (input) =>
       Effect.gen(function* () {

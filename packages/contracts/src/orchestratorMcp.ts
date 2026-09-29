@@ -16,10 +16,13 @@ import {
   TrimmedNonEmptyString,
   TurnItemId,
 } from "./baseSchemas.ts";
+import { ModelSelection } from "./modelSelection.ts";
 import {
   ScheduledTaskRunStatus,
   ScheduledTaskSchedule,
   ScheduledTaskUpsertSchedule,
+  WorkflowAgentRoute,
+  WorkflowDelivery,
 } from "./scheduledTask.ts";
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 import { ThreadLinkedPullRequest } from "./threadPullRequest.ts";
@@ -534,6 +537,35 @@ export type OrchestratorMcpScheduledTask = typeof OrchestratorMcpScheduledTask.T
 
 export const OrchestratorMcpScheduleTaskResult = OrchestratorMcpScheduledTask;
 export type OrchestratorMcpScheduleTaskResult = typeof OrchestratorMcpScheduleTaskResult.Type;
+
+const OrchestratorMcpWorkflowAgentInput = Schema.Struct({
+  name: TrimmedNonEmptyString,
+  prompt: OrchestratorMcpPrompt,
+  modelSelection: Schema.optional(ModelSelection),
+  route: Schema.optional(WorkflowAgentRoute),
+  advance: Schema.optional(Schema.Literals(["continue", "wait"])),
+});
+
+export const OrchestratorMcpCreateWorkflowInput = Schema.Struct({
+  kind: Schema.Literals(["automation", "verification"]),
+  title: Schema.optional(OrchestratorMcpTitle),
+  source: Schema.optional(Schema.Literals(["any", "github", "basecamp"])),
+  events: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  workKey: Schema.optional(TrimmedNonEmptyString),
+  prompt: Schema.optional(OrchestratorMcpPrompt),
+  agents: Schema.optional(Schema.Array(OrchestratorMcpWorkflowAgentInput)),
+  delivery: Schema.optional(WorkflowDelivery),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpCreateWorkflowInput = typeof OrchestratorMcpCreateWorkflowInput.Type;
+
+export const OrchestratorMcpCreateWorkflowResult = Schema.Struct({
+  scheduledTaskId: ScheduledTaskId,
+  title: Schema.String,
+  kind: Schema.Literals(["automation", "verification"]),
+  webhookPath: Schema.NullOr(Schema.String),
+});
+export type OrchestratorMcpCreateWorkflowResult = typeof OrchestratorMcpCreateWorkflowResult.Type;
 
 export const OrchestratorMcpListScheduledTasksResult = Schema.Struct({
   tasks: Schema.Array(OrchestratorMcpScheduledTask),

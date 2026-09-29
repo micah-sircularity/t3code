@@ -65,6 +65,51 @@ export const ScheduledTaskWebhookSample = Schema.Struct({
 });
 export type ScheduledTaskWebhookSample = typeof ScheduledTaskWebhookSample.Type;
 
+export const WorkflowAgentRoute = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("auto") }),
+  Schema.Struct({
+    type: Schema.Literal("environment"),
+    environmentId: TrimmedNonEmptyString,
+    label: Schema.optional(TrimmedNonEmptyString),
+  }),
+]);
+export type WorkflowAgentRoute = typeof WorkflowAgentRoute.Type;
+
+export const WorkflowAgent = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  name: TrimmedNonEmptyString,
+  prompt: Schema.String,
+  /** Provider and model for this step. Omit to use the task model. */
+  modelSelection: Schema.optional(ModelSelection),
+  route: Schema.optional(WorkflowAgentRoute),
+  /** "wait" parks until a later event for the same work. "continue" starts the next agent when this one finishes verified. */
+  advance: Schema.optional(Schema.Literals(["continue", "wait"])),
+});
+export type WorkflowAgent = typeof WorkflowAgent.Type;
+
+export const WorkflowDelivery = Schema.Struct({
+  summary: Schema.optional(Schema.String),
+});
+export type WorkflowDelivery = typeof WorkflowDelivery.Type;
+
+export const WorkflowRunStatus = Schema.Literals([
+  "running",
+  "waiting",
+  "verified",
+  "stopped",
+  "delivered",
+]);
+export type WorkflowRunStatus = typeof WorkflowRunStatus.Type;
+
+export const WorkflowRunView = Schema.Struct({
+  workId: Schema.String,
+  agentIndex: Schema.Int,
+  status: WorkflowRunStatus,
+  detail: Schema.NullOr(Schema.String),
+  routeLabel: Schema.NullOr(Schema.String),
+});
+export type WorkflowRunView = typeof WorkflowRunView.Type;
+
 const ScheduledTaskWebhookSchedule = Schema.Struct({
   type: Schema.Literal("webhook").annotate({
     description: "Select webhook triggering.",
@@ -80,6 +125,10 @@ const ScheduledTaskWebhookSchedule = Schema.Struct({
     description:
       "Event keys that start a run, such as 'pull_request.opened', 'pull_request', 'deployment_status.success', or Basecamp 'todo_created'. Omit or leave empty to accept every event.",
   }),
+  /** Dot path into the JSON body that identifies one piece of work, such as "issue.id" or "pull_request.number". */
+  workKey: Schema.optional(TrimmedNonEmptyString),
+  agents: Schema.optional(Schema.Array(WorkflowAgent)),
+  delivery: Schema.optional(WorkflowDelivery),
 }).annotate({
   description: "Never run on a timer; run once per event posted to the task's webhook URL.",
 });
@@ -148,6 +197,7 @@ export const ScheduledTask = Schema.Struct({
     description:
       "Server-relative URL (path and token) that triggers a webhook task; null for timed tasks.",
   }),
+  workflowRun: Schema.optional(Schema.NullOr(WorkflowRunView)),
   webhookUrl: Schema.optional(Schema.NullOr(Schema.String)).annotate({
     description:
       "Absolute public URL for the webhook when the server knows its public host (Tailscale Funnel or T3CODE_WEBHOOK_BASE_URL).",

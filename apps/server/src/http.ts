@@ -488,7 +488,13 @@ export const scheduledTaskWebhookRouteLayer = HttpRouter.add(
     const { task, skipped } = result.success;
     if (skipped) {
       return HttpServerResponse.jsonUnsafe(
-        { taskId: task.id, deliveryId, skipped: true, event: event.keys[0] ?? event.source },
+        {
+          taskId: task.id,
+          deliveryId,
+          skipped: true,
+          reason: result.success.reason,
+          event: event.keys[0] ?? event.source,
+        },
         { status: 202 },
       );
     }
@@ -501,7 +507,7 @@ export const scheduledTaskWebhookRouteLayer = HttpRouter.add(
         error: task.lastRunError,
         runCount: task.runCount,
       },
-      { status: task.lastRunStatus === "failed" ? 502 : 202 },
+      { status: 202 },
     );
   }),
 );

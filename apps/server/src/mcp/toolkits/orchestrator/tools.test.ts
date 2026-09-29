@@ -3,6 +3,7 @@ import { Tool } from "effect/unstable/ai";
 
 import {
   CreateThreadsTool,
+  CreateWorkflowTool,
   DelegateTaskTool,
   ScheduleTaskTool,
   ThreadUpdateTool,
@@ -59,6 +60,9 @@ describe("orchestrator MCP tool guidance", () => {
     assert.isAtLeast(schema.properties?.schedule?.anyOf?.length ?? 0, 2);
     assert.include(ScheduleTaskTool.description ?? "", "STRUCTURED OBJECT");
     assert.include(ScheduleTaskTool.description ?? "", "nextRunAt");
+    assert.include(CreateWorkflowTool.description ?? "", "kind='automation'");
+    assert.include(CreateWorkflowTool.description ?? "", "kind='verification'");
+    assert.include(CreateWorkflowTool.description ?? "", "preview_*");
   });
 
   it("publishes thread metadata actions from an object-root schema", () => {

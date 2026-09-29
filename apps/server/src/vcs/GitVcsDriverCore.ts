@@ -994,6 +994,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       }),
     );
 
+  const gitStderrDetail = (stderr: string): string | null => {
+    const line = stderr
+      .split("\n")
+      .map((entry) => entry.trim())
+      .find((entry) => entry.length > 0 && !entry.startsWith("warning:"));
+    return line === undefined ? null : line.slice(0, 240);
+  };
+
   const executeGit = (
     operation: string,
     cwd: string,
@@ -1019,7 +1027,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         (result) =>
           new GitCommandError({
             ...gitCommandContext({ operation, cwd, args }),
-            detail: options.fallbackErrorDetail ?? "Git command exited with a non-zero status.",
+            detail:
+              gitStderrDetail(result.stderr) ??
+              options.fallbackErrorDetail ??
+              "Git command exited with a non-zero status.",
             ...(result.exitCode === null ? {} : { exitCode: result.exitCode }),
             stdoutLength: result.stdout.length,
             stderrLength: result.stderr.length,

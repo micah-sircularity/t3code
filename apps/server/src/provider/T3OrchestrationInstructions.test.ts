@@ -19,6 +19,8 @@ describe("T3 orchestration provider instructions", () => {
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "structured object, never as JSON text");
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, '"everyMs":3600000');
     assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "bindToCurrentThread=false");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "create_workflow");
+    assert.include(T3_CODE_ORCHESTRATION_INSTRUCTIONS, "preview_*");
   });
 
   it("injects prompt fallback only for an MCP-enabled first run", () => {
