@@ -51,6 +51,7 @@ import { layer as threadLifecycleServiceLayer } from "./ThreadLifecycleService.t
 import { layer as threadForkServiceLayer } from "./ThreadForkService.ts";
 import { layer as turnItemPositionStoreLayer } from "./TurnItemPositionStore.ts";
 import { layer as scheduledTaskServiceLayer } from "../scheduledTasks/ScheduledTaskService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 
 /** The shared application event log and its command receipts. */
 export const OrchestrationEventInfrastructureLayerLive = Layer.mergeAll(
@@ -257,7 +258,15 @@ const threadLifecycleProvided = threadLifecycleServiceLayer.pipe(
   Layer.provide(threadManagementProvided),
 );
 const scheduledTaskProvided = scheduledTaskServiceLayer.pipe(
-  Layer.provide(Layer.mergeAll(threadLaunchProvided, threadManagementProvided)),
+  Layer.provide(
+    Layer.mergeAll(
+      threadLaunchProvided,
+      threadManagementProvided,
+      projectionStoreLayer,
+      ProjectStore.layer,
+      GitVcsDriver.layer,
+    ),
+  ),
 );
 const providerContinuationWorkerProvided = providerContinuationWorkerLive.pipe(
   Layer.provide(

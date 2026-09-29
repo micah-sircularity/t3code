@@ -1,5 +1,19 @@
 import type { WorkflowAgent, WorkflowRunStatus } from "@t3tools/contracts";
 
+/** Turn `git diff --no-index /dev/null <file>` into a patch `git apply` accepts for that path. */
+export function rewriteUntrackedDiff(relativePath: string, raw: string): string {
+  const slash = relativePath.replaceAll("\\", "/");
+  return raw
+    .split("\n")
+    .map((line) => {
+      if (line.startsWith("diff --git ")) return `diff --git a/${slash} b/${slash}`;
+      if (line.startsWith("--- ")) return "--- /dev/null";
+      if (line.startsWith("+++ ")) return `+++ b/${slash}`;
+      return line;
+    })
+    .join("\n");
+}
+
 /** Read a dot path such as "pull_request.number" or "issue.id" from a JSON body. */
 export function workIdFromPayload(body: string, workKey: string | undefined): string | null {
   if (workKey === undefined || workKey.trim() === "") return null;

@@ -16,6 +16,8 @@ import {
   type OrchestratorMcpCreateThreadsResult,
   type OrchestratorMcpCreateWorkflowInput,
   type OrchestratorMcpCreateWorkflowResult,
+  type OrchestratorMcpRunVerifierInput,
+  type OrchestratorMcpRunVerifierResult,
   type OrchestratorMcpCreatedThread,
   type OrchestratorMcpDelegateTaskInput,
   type OrchestratorMcpDelegateTaskResult,
@@ -118,6 +120,10 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpCreateWorkflowInput,
   ) => Effect.Effect<OrchestratorMcpCreateWorkflowResult, OrchestratorMcpFailure>;
+  readonly runVerifier: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpRunVerifierInput,
+  ) => Effect.Effect<OrchestratorMcpRunVerifierResult, OrchestratorMcpFailure>;
   readonly listScheduledTasks: (
     scope: McpInvocationScope,
   ) => Effect.Effect<OrchestratorMcpListScheduledTasksResult, OrchestratorMcpFailure>;
@@ -1320,6 +1326,20 @@ const make = Effect.gen(function* () {
           kind: input.kind,
           webhookPath: task.webhookPath ?? null,
         };
+      }),
+    runVerifier: (scope, input) =>
+      Effect.gen(function* () {
+        yield* requireCapability(scope);
+        const result = yield* scheduledTasks
+          .requestVerifierRun({
+            threadId: scope.threadId,
+            ...(input.scheduledTaskId === undefined
+              ? {}
+              : { scheduledTaskId: input.scheduledTaskId }),
+            ...(input.title === undefined ? {} : { title: input.title }),
+          })
+          .pipe(Effect.mapError((error) => failure("orchestration_error", error.message)));
+        return result;
       }),
     listScheduledTasks: (scope) =>
       Effect.gen(function* () {

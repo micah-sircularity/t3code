@@ -6,6 +6,7 @@ import {
   type ServerLifecycleStreamReadyEvent,
   type ServerSelfUpdateProgressEvent,
   type ServerSelfUpdateResult,
+  ORCHESTRATION_V2_WS_METHODS,
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -1283,6 +1284,30 @@ export function createServerEnvironmentAtoms<R, E>(
     testScheduledWebhook: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:scheduled-task:test-webhook",
       tag: WS_METHODS.scheduledTasksTestWebhook,
+    }),
+    verifierHandoffsLive: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:server:verifier-handoffs:live",
+      tag: WS_METHODS.scheduledTasksSubscribeVerifierHandoffs,
+    }),
+    claimVerifierHandoff: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:verifier-handoff:claim",
+      tag: WS_METHODS.scheduledTasksClaimVerifierHandoff,
+    }),
+    prepareVerifierHandoff: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:verifier-handoff:prepare",
+      tag: WS_METHODS.scheduledTasksPrepareVerifierHandoff,
+    }),
+    settleVerifierHandoff: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:verifier-handoff:settle",
+      tag: WS_METHODS.scheduledTasksSettleVerifierHandoff,
+    }),
+    startVerifierRun: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:verifier-run:start",
+      tag: WS_METHODS.scheduledTasksStartVerifierRun,
+    }),
+    dispatchOrchestrationCommand: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:orchestration:dispatch",
+      tag: ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
     }),
     refreshUsageRates: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:refresh-usage-rates",

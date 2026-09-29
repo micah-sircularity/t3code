@@ -315,6 +315,15 @@ import {
   ScheduledTaskSetEnabledInput,
   ScheduledTaskUpsertInput,
   ScheduledTaskMutationResult,
+  StartVerifierRunInput,
+  StartVerifierRunResult,
+  VerifierHandoffClaimInput,
+  VerifierHandoffClaimResult,
+  VerifierHandoffListResult,
+  VerifierHandoffPrepareInput,
+  VerifierHandoffPrepareResult,
+  VerifierHandoffSettleInput,
+  VerifierHandoffSettleResult,
 } from "./scheduledTask.ts";
 import {
   ProjectCloneActionInput,
@@ -476,6 +485,11 @@ export const WS_METHODS = {
   scheduledTasksDelete: "scheduledTasks.delete",
   scheduledTasksRunNow: "scheduledTasks.runNow",
   scheduledTasksTestWebhook: "scheduledTasks.testWebhook",
+  scheduledTasksSubscribeVerifierHandoffs: "scheduledTasks.subscribeVerifierHandoffs",
+  scheduledTasksClaimVerifierHandoff: "scheduledTasks.claimVerifierHandoff",
+  scheduledTasksPrepareVerifierHandoff: "scheduledTasks.prepareVerifierHandoff",
+  scheduledTasksSettleVerifierHandoff: "scheduledTasks.settleVerifierHandoff",
+  scheduledTasksStartVerifierRun: "scheduledTasks.startVerifierRun",
 
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
@@ -1670,6 +1684,49 @@ const WsScheduledTasksTestWebhookRpc = Rpc.make(WS_METHODS.scheduledTasksTestWeb
   error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
 });
 
+const WsScheduledTasksSubscribeVerifierHandoffsRpc = Rpc.make(
+  WS_METHODS.scheduledTasksSubscribeVerifierHandoffs,
+  {
+    payload: Schema.Struct({}),
+    success: VerifierHandoffListResult,
+    error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
+    stream: true,
+  },
+);
+
+const WsScheduledTasksClaimVerifierHandoffRpc = Rpc.make(
+  WS_METHODS.scheduledTasksClaimVerifierHandoff,
+  {
+    payload: VerifierHandoffClaimInput,
+    success: VerifierHandoffClaimResult,
+    error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
+  },
+);
+
+const WsScheduledTasksPrepareVerifierHandoffRpc = Rpc.make(
+  WS_METHODS.scheduledTasksPrepareVerifierHandoff,
+  {
+    payload: VerifierHandoffPrepareInput,
+    success: VerifierHandoffPrepareResult,
+    error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
+  },
+);
+
+const WsScheduledTasksSettleVerifierHandoffRpc = Rpc.make(
+  WS_METHODS.scheduledTasksSettleVerifierHandoff,
+  {
+    payload: VerifierHandoffSettleInput,
+    success: VerifierHandoffSettleResult,
+    error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
+  },
+);
+
+const WsScheduledTasksStartVerifierRunRpc = Rpc.make(WS_METHODS.scheduledTasksStartVerifierRun, {
+  payload: StartVerifierRunInput,
+  success: StartVerifierRunResult,
+  error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
+});
+
 const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
   payload: Schema.Struct({}),
   success: AuthAccessStreamEvent,
@@ -1746,6 +1803,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsScheduledTasksDeleteRpc,
   WsScheduledTasksRunNowRpc,
   WsScheduledTasksTestWebhookRpc,
+  WsScheduledTasksSubscribeVerifierHandoffsRpc,
+  WsScheduledTasksClaimVerifierHandoffRpc,
+  WsScheduledTasksPrepareVerifierHandoffRpc,
+  WsScheduledTasksSettleVerifierHandoffRpc,
+  WsScheduledTasksStartVerifierRunRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
   WsServerGetBackgroundPolicyRpc,

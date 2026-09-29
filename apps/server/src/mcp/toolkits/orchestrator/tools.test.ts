@@ -5,6 +5,7 @@ import {
   CreateThreadsTool,
   CreateWorkflowTool,
   DelegateTaskTool,
+  RunVerifierTool,
   ScheduleTaskTool,
   ThreadUpdateTool,
 } from "./tools.ts";
@@ -60,9 +61,12 @@ describe("orchestrator MCP tool guidance", () => {
     assert.isAtLeast(schema.properties?.schedule?.anyOf?.length ?? 0, 2);
     assert.include(ScheduleTaskTool.description ?? "", "STRUCTURED OBJECT");
     assert.include(ScheduleTaskTool.description ?? "", "nextRunAt");
-    assert.include(CreateWorkflowTool.description ?? "", "kind='automation'");
-    assert.include(CreateWorkflowTool.description ?? "", "kind='verification'");
-    assert.include(CreateWorkflowTool.description ?? "", "preview_*");
+    assert.include(CreateWorkflowTool.description ?? "", "kind automation");
+    assert.include(CreateWorkflowTool.description ?? "", "workKey");
+    assert.include(CreateWorkflowTool.description ?? "", "VERIFIED");
+    assert.include(CreateWorkflowTool.description ?? "", "webhookPath");
+    assert.include(RunVerifierTool.description ?? "", "this repo");
+    assert.include(RunVerifierTool.description ?? "", "scheduledTaskId");
   });
 
   it("publishes thread metadata actions from an object-root schema", () => {

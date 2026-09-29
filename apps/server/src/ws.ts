@@ -2023,6 +2023,36 @@ const makeWsRpcLayer = (
             scheduledTasks.testWebhook(input),
             { "rpc.aggregate": "scheduledTasks" },
           ),
+        [WS_METHODS.scheduledTasksSubscribeVerifierHandoffs]: (_input) =>
+          observeRpcStream(
+            WS_METHODS.scheduledTasksSubscribeVerifierHandoffs,
+            scheduledTasks.subscribeVerifierHandoffs(),
+            { "rpc.aggregate": "scheduledTasks" },
+          ),
+        [WS_METHODS.scheduledTasksClaimVerifierHandoff]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.scheduledTasksClaimVerifierHandoff,
+            scheduledTasks.claimVerifierHandoff(input),
+            { "rpc.aggregate": "scheduledTasks" },
+          ),
+        [WS_METHODS.scheduledTasksPrepareVerifierHandoff]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.scheduledTasksPrepareVerifierHandoff,
+            scheduledTasks.prepareVerifierHandoff(input),
+            { "rpc.aggregate": "scheduledTasks" },
+          ),
+        [WS_METHODS.scheduledTasksSettleVerifierHandoff]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.scheduledTasksSettleVerifierHandoff,
+            scheduledTasks.settleVerifierHandoff(input),
+            { "rpc.aggregate": "scheduledTasks" },
+          ),
+        [WS_METHODS.scheduledTasksStartVerifierRun]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.scheduledTasksStartVerifierRun,
+            scheduledTasks.startVerifierRun(input),
+            { "rpc.aggregate": "scheduledTasks" },
+          ),
         [WS_METHODS.serverProbe]: (_input) =>
           observeRpcEffect(WS_METHODS.serverProbe, Effect.succeed({}), {
             "rpc.aggregate": "server",

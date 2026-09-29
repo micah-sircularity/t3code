@@ -286,6 +286,90 @@ export const ScheduledTaskTestWebhookResult = Schema.Struct({
 });
 export type ScheduledTaskTestWebhookResult = typeof ScheduledTaskTestWebhookResult.Type;
 
+export const VerifierHandoffStatus = Schema.Literals(["pending", "claimed", "running", "failed"]);
+export type VerifierHandoffStatus = typeof VerifierHandoffStatus.Type;
+
+export const VerifierHandoff = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  projectId: ProjectId,
+  threadId: ThreadId,
+  taskId: ScheduledTaskId,
+  status: VerifierHandoffStatus,
+  branch: Schema.NullOr(Schema.String),
+  detail: Schema.NullOr(Schema.String),
+  targetLabel: Schema.NullOr(Schema.String),
+});
+export type VerifierHandoff = typeof VerifierHandoff.Type;
+
+export const VerifierHandoffListResult = Schema.Struct({
+  handoffs: Schema.Array(VerifierHandoff),
+});
+export type VerifierHandoffListResult = typeof VerifierHandoffListResult.Type;
+
+export const VerifierHandoffClaimInput = Schema.Struct({
+  id: TrimmedNonEmptyString,
+});
+export type VerifierHandoffClaimInput = typeof VerifierHandoffClaimInput.Type;
+
+export const VerifierHandoffClaimResult = Schema.Struct({
+  claimed: Schema.Boolean,
+});
+export type VerifierHandoffClaimResult = typeof VerifierHandoffClaimResult.Type;
+
+export const VerifierHandoffPrepareInput = Schema.Struct({
+  id: TrimmedNonEmptyString,
+});
+export type VerifierHandoffPrepareInput = typeof VerifierHandoffPrepareInput.Type;
+
+export const VerifierHandoffPrepareResult = Schema.Struct({
+  branch: TrimmedNonEmptyString,
+  baseRef: TrimmedNonEmptyString,
+  patch: Schema.String,
+  title: TrimmedNonEmptyString,
+  prompt: Schema.String,
+  schedule: ScheduledTaskUpsertSchedule,
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  sourceTaskId: ScheduledTaskId,
+});
+export type VerifierHandoffPrepareResult = typeof VerifierHandoffPrepareResult.Type;
+
+export const VerifierHandoffSettleInput = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  status: Schema.Literals(["running", "failed"]),
+  detail: Schema.optional(Schema.String),
+  targetLabel: Schema.optional(Schema.String),
+});
+export type VerifierHandoffSettleInput = typeof VerifierHandoffSettleInput.Type;
+
+export const VerifierHandoffSettleResult = Schema.Struct({
+  ok: Schema.Boolean,
+});
+export type VerifierHandoffSettleResult = typeof VerifierHandoffSettleResult.Type;
+
+export const StartVerifierRunInput = Schema.Struct({
+  projectId: ProjectId,
+  sourceTaskId: ScheduledTaskId,
+  title: TrimmedNonEmptyString,
+  prompt: Schema.String,
+  schedule: ScheduledTaskUpsertSchedule,
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  branch: TrimmedNonEmptyString,
+  baseRef: TrimmedNonEmptyString,
+  patch: Schema.String,
+  deliveryId: TrimmedNonEmptyString,
+});
+export type StartVerifierRunInput = typeof StartVerifierRunInput.Type;
+
+export const StartVerifierRunResult = Schema.Struct({
+  threadId: Schema.NullOr(ThreadId),
+  workId: TrimmedNonEmptyString,
+});
+export type StartVerifierRunResult = typeof StartVerifierRunResult.Type;
+
 export class ScheduledTaskError extends Schema.TaggedError<ScheduledTaskError>()(
   "ScheduledTaskError",
   {

@@ -4,6 +4,8 @@ import {
   OrchestratorMcpCreateThreadsResult,
   OrchestratorMcpCreateWorkflowInput,
   OrchestratorMcpCreateWorkflowResult,
+  OrchestratorMcpRunVerifierInput,
+  OrchestratorMcpRunVerifierResult,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpDeleteScheduledTaskInput,
@@ -98,7 +100,7 @@ const TaskCancelTool = Tool.make("task_cancel", {
 
 export const CreateWorkflowTool = Tool.make("create_workflow", {
   description:
-    "Create a webhook workflow on this project. kind='automation' is one prompt and no agents. kind='verification' is an ordered agent loop: each agent has name, prompt, optional modelSelection, route ({type:'auto'} by default, or {type:'environment', environmentId, label}), and advance ('wait' for a later event, or 'continue' when the agent finishes). A verification requires workKey, a dot path such as issue.id. Each verification prompt must end with VERIFIED or STOP. Do not bind the run to this thread. Use schedule_task for timers. When a step needs a page, use the T3 browser preview_* tools. Report the returned webhookPath.",
+    "Create a webhook workflow. kind automation runs one prompt. kind verification runs an ordered agent loop and requires workKey, the dot path for one piece of work such as issue.id. Write each verification prompt so the agent ends with VERIFIED to continue or STOP to end. After success, report webhookPath.",
   parameters: OrchestratorMcpCreateWorkflowInput,
   success: OrchestratorMcpCreateWorkflowResult,
   failure: OrchestratorMcpFailure,
@@ -106,6 +108,19 @@ export const CreateWorkflowTool = Tool.make("create_workflow", {
   dependencies,
 })
   .annotate(Tool.Title, "Create a webhook workflow")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+
+export const RunVerifierTool = Tool.make("run_verifier", {
+  description:
+    "Run this repo's verifier on another machine that already has the repo. Call it when the user asks to verify the current branch. Pass scheduledTaskId when this repo has more than one verifier. The branch is pushed and uncommitted changes are included. Report the returned machine and branch.",
+  parameters: OrchestratorMcpRunVerifierInput,
+  success: OrchestratorMcpRunVerifierResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Run this repo's verifier")
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
@@ -258,6 +273,7 @@ export const OrchestratorToolkit = Toolkit.make(
   TaskStatusTool,
   TaskCancelTool,
   CreateWorkflowTool,
+  RunVerifierTool,
   ScheduleTaskTool,
   ListScheduledTasksTool,
   UpdateScheduledTaskTool,

@@ -54,9 +54,10 @@ import {
   scheduledTaskDefaultModel,
   taskToDraft,
   type DraftState,
+  type WorkflowAgentDraft,
   type WorkspaceMode,
 } from "./scheduledTasksSettings.logic";
-import { VerificationAgentFields, VerificationPath } from "./VerificationLoop";
+import { sharedStepRoute, VerificationAgentFields, VerificationPath } from "./VerificationLoop";
 import { Label } from "../ui/label";
 import { Menu, MenuTrigger, MenuPopup, MenuItem, MenuSeparator } from "../ui/menu";
 import { ToggleGroup, Toggle } from "../ui/toggle-group";
@@ -246,6 +247,47 @@ function scheduleFromDraft(draft: DraftState): ScheduledTaskSchedule {
     timeOfDay: draft.timeOfDay || "09:00",
     ...(selectedEveryDay ? {} : { weekdays: [...draft.weekdays].toSorted() }),
   };
+}
+
+function webhookTriggerLabel(
+  source: "any" | "github" | "basecamp" | null | undefined,
+  events: readonly string[] | string,
+): string {
+  const list =
+    typeof events === "string"
+      ? events
+          .split(",")
+          .map((event) => event.trim())
+          .filter((event) => event.length > 0)
+      : events;
+  const sourceLabel =
+    source === "github" ? "GitHub" : source === "basecamp" ? "Basecamp" : "Webhook";
+  return `${sourceLabel} · ${list.length === 0 ? "Any event" : list.join(", ")}`;
+}
+
+function taskCadence(task: ScheduledTask): string {
+  if (!task.enabled) return "Paused";
+  if (task.schedule.type === "webhook") return "Listening";
+  if (task.nextRunAt) return `Next run ${relativeLabel(task.nextRunAt)}`;
+  return "Not scheduled";
+}
+
+function verificationAgents(task: ScheduledTask): ReadonlyArray<WorkflowAgentDraft> {
+  if (task.schedule.type !== "webhook") return [];
+  return (task.schedule.agents ?? []).map((agent) => ({
+    id: agent.id,
+    name: agent.name,
+    prompt: agent.prompt,
+    modelKey: agent.modelSelection
+      ? `${agent.modelSelection.instanceId}:${agent.modelSelection.model}`
+      : "",
+    route: agent.route?.type === "environment" ? agent.route.environmentId : "auto",
+    routeLabel:
+      agent.route?.type === "environment"
+        ? (agent.route.label ?? agent.route.environmentId)
+        : "Auto balance",
+    advance: agent.advance ?? "wait",
+  }));
 }
 
 export function scheduleLabel(schedule: ScheduledTaskSchedule): string {
@@ -491,35 +533,12 @@ function ScheduledTaskEnvironmentSection({
             />
           ) : (
             tasks.map((task) => (
-              <div key={task.id} className="flex flex-col gap-2">
-                {mode === "verification" && task.schedule.type === "webhook" ? (
-                  <VerificationPath
-                    trigger={task.schedule.events?.join(", ") || "Any event"}
-                    agents={(task.schedule.agents ?? []).map((agent) => ({
-                      id: agent.id,
-                      name: agent.name,
-                      prompt: agent.prompt,
-                      modelKey: agent.modelSelection
-                        ? `${agent.modelSelection.instanceId}:${agent.modelSelection.model}`
-                        : "",
-                      route:
-                        agent.route?.type === "environment" ? agent.route.environmentId : "auto",
-                      routeLabel:
-                        agent.route?.type === "environment"
-                          ? (agent.route.label ?? agent.route.environmentId)
-                          : "Auto balance",
-                      advance: agent.advance ?? "wait",
-                    }))}
-                    delivery={task.schedule.delivery?.summary ?? ""}
-                    {...(task.workflowRun === undefined ? {} : { run: task.workflowRun })}
-                  />
-                ) : null}
-                <ScheduledTaskRow
-                  environmentId={environment.environmentId}
-                  task={task}
-                  onEdit={() => onEdit(environment.environmentId, task)}
-                />
-              </div>
+              <ScheduledTaskRow
+                key={task.id}
+                environmentId={environment.environmentId}
+                task={task}
+                onEdit={() => onEdit(environment.environmentId, task)}
+              />
             ))
           )}
         </>
@@ -547,6 +566,24 @@ function ScheduledTaskRow({
   const remove = useAtomCommand(serverEnvironment.deleteScheduledTask, {
     label: "scheduled task delete",
   });
+  const verification = isVerificationTask(task);
+  const agents = verificationAgents(task);
+  const sharedRoute = sharedStepRoute(agents);
+  const cadence = taskCadence(task);
+  const footer = verification
+    ? sharedRoute
+      ? `${sharedRoute} · ${cadence}`
+      : cadence
+    : `${scheduleLabel(task.schedule)} · ${cadence}`;
+  const meta = (
+    <div className="flex flex-wrap items-center gap-2">
+      <span>{footer}</span>
+      {task.lastRunStatus !== "never" ? (
+        <Badge variant={statusVariant(task.lastRunStatus)}>{task.lastRunStatus}</Badge>
+      ) : null}
+      {task.lastRunError ? <span className="text-destructive">{task.lastRunError}</span> : null}
+    </div>
+  );
   const act = async (action: "toggle" | "run" | "delete") => {
     if (busy) return;
     setBusy(true);
@@ -570,23 +607,9 @@ function ScheduledTaskRow({
   return (
     <SettingsRow
       title={task.title}
-      description={<span className="line-clamp-2">{task.prompt}</span>}
-      status={
-        <div className="flex flex-wrap items-center gap-2">
-          <span>
-            {scheduleLabel(task.schedule)} ·{" "}
-            {task.enabled
-              ? task.nextRunAt
-                ? `Next run ${relativeLabel(task.nextRunAt)}`
-                : "Not scheduled"
-              : "Paused"}
-          </span>
-          {task.lastRunStatus !== "never" ? (
-            <Badge variant={statusVariant(task.lastRunStatus)}>{task.lastRunStatus}</Badge>
-          ) : null}
-          {task.lastRunError ? <span className="text-destructive">{task.lastRunError}</span> : null}
-        </div>
-      }
+      description={verification ? undefined : <span className="line-clamp-2">{task.prompt}</span>}
+      status={verification ? undefined : meta}
+      {...(verification ? { className: "pb-3" } : {})}
       control={
         <div className="flex items-center gap-2">
           <Switch
@@ -632,7 +655,19 @@ function ScheduledTaskRow({
           </Menu>
         </div>
       }
-    />
+    >
+      {verification && task.schedule.type === "webhook" ? (
+        <div className="mt-3 flex flex-col gap-2">
+          <VerificationPath
+            trigger={webhookTriggerLabel(task.schedule.source, task.schedule.events ?? [])}
+            agents={agents}
+            delivery={task.schedule.delivery?.summary ?? ""}
+            {...(task.workflowRun === undefined ? {} : { run: task.workflowRun })}
+          />
+          <div className="text-xs text-muted-foreground">{meta}</div>
+        </div>
+      ) : null}
+    </SettingsRow>
   );
 }
 
@@ -1124,6 +1159,7 @@ function ScheduledTaskEditorDialog({
                   />
                   {draft.workflowAgents.length > 0 ? (
                     <VerificationAgentFields
+                      trigger={webhookTriggerLabel(draft.webhookSource, draft.webhookEvents)}
                       agents={draft.workflowAgents}
                       workKey={draft.workKey}
                       deliverySummary={draft.deliverySummary}

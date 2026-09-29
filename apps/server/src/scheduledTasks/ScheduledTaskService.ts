@@ -18,6 +18,18 @@ import {
   type WorkflowRunStatus,
   type WorkflowRunView,
   type ScheduledTaskUpsertInput,
+  type StartVerifierRunInput,
+  type StartVerifierRunResult,
+  type VerifierHandoff,
+  type VerifierHandoffClaimInput,
+  type VerifierHandoffClaimResult,
+  type VerifierHandoffListResult,
+  type VerifierHandoffPrepareInput,
+  type VerifierHandoffPrepareResult,
+  type VerifierHandoffSettleInput,
+  type VerifierHandoffSettleResult,
+  ProjectId,
+  type OrchestrationV2ThreadLaunchWorkspaceStrategy,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -44,13 +56,17 @@ import {
   renderWebhookEvent,
   webhookFilterAccepts,
 } from "./WebhookEvent.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
 import {
   nextWorkflowStatus,
+  rewriteUntrackedDiff,
   routeLabel,
   verdictFromText,
   workIdFromPayload,
@@ -121,6 +137,35 @@ export class ScheduledTaskService extends Context.Service<
     readonly testWebhook: (
       input: ScheduledTaskTestWebhookInput,
     ) => Effect.Effect<ScheduledTaskTestWebhookResult, ScheduledTaskError>;
+    readonly subscribeVerifierHandoffs: () => Stream.Stream<
+      VerifierHandoffListResult,
+      ScheduledTaskError
+    >;
+    readonly claimVerifierHandoff: (
+      input: VerifierHandoffClaimInput,
+    ) => Effect.Effect<VerifierHandoffClaimResult, ScheduledTaskError>;
+    readonly prepareVerifierHandoff: (
+      input: VerifierHandoffPrepareInput,
+    ) => Effect.Effect<VerifierHandoffPrepareResult, ScheduledTaskError>;
+    readonly settleVerifierHandoff: (
+      input: VerifierHandoffSettleInput,
+    ) => Effect.Effect<VerifierHandoffSettleResult, ScheduledTaskError>;
+    readonly startVerifierRun: (
+      input: StartVerifierRunInput,
+    ) => Effect.Effect<StartVerifierRunResult, ScheduledTaskError>;
+    readonly requestVerifierRun: (input: {
+      readonly threadId: ThreadId;
+      readonly scheduledTaskId?: ScheduledTaskId;
+      readonly title?: string;
+    }) => Effect.Effect<
+      {
+        readonly scheduledTaskId: ScheduledTaskId;
+        readonly title: string;
+        readonly branch: string;
+        readonly machine: string;
+      },
+      ScheduledTaskError
+    >;
     readonly runWebhook: (input: {
       readonly id: ScheduledTaskId;
       readonly token: string;
@@ -265,6 +310,21 @@ export const layer = Layer.effect(
     const crypto = yield* Crypto.Crypto;
     const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
+    const projects = yield* Effect.serviceOption(ProjectStore.ProjectStoreV2);
+    const projections = yield* Effect.serviceOption(ProjectionStore.ProjectionStoreV2);
+    const git = yield* Effect.serviceOption(GitVcsDriver.GitVcsDriver);
+    const requireVerifierServices = Effect.fn("ScheduledTaskService.requireVerifierServices")(
+      function* () {
+        if (Option.isNone(git) || Option.isNone(projects) || Option.isNone(projections)) {
+          return yield* taskError("Verifier send is unavailable on this server.");
+        }
+        return {
+          git: git.value,
+          projects: projects.value,
+          projections: projections.value,
+        };
+      },
+    );
     const scheduler = yield* Scheduler.Scheduler;
     const activeRuns = yield* Ref.make<ReadonlySet<ScheduledTaskId>>(new Set());
     const maxWebhookLaunches = Math.max(
@@ -566,6 +626,7 @@ export const layer = Layer.effect(
         readonly title?: string;
         readonly agentIndex?: number;
         readonly modelSelection?: ScheduledTask["modelSelection"];
+        readonly workspaceStrategy?: OrchestrationV2ThreadLaunchWorkspaceStrategy;
       },
     ) {
       // Events arrive independently, so webhook runs overlap instead of
@@ -647,7 +708,7 @@ export const layer = Layer.effect(
                   modelSelection,
                   runtimeMode: active.runtimeMode,
                   interactionMode: active.interactionMode,
-                  workspaceStrategy: active.workspaceStrategy,
+                  workspaceStrategy: event?.workspaceStrategy ?? active.workspaceStrategy,
                   initialMessage: {
                     messageId,
                     scheduledTaskId: active.id,
@@ -759,13 +820,14 @@ export const layer = Layer.effect(
       readonly last_delivery_id: string | null;
       readonly detail: string | null;
       readonly route_label: string | null;
+      readonly worktree_path: string | null;
     };
 
     const workflowRunKey = (taskId: string, workId: string) => `${taskId}\u0000${workId}`;
 
     const readWorkflowRun = (taskId: string, workId: string) =>
       sql<WorkflowRow>`
-        SELECT run_key, task_id, work_id, agent_index, status, thread_id, last_delivery_id, detail, route_label
+        SELECT run_key, task_id, work_id, agent_index, status, thread_id, last_delivery_id, detail, route_label, worktree_path
         FROM workflow_runs
         WHERE run_key = ${workflowRunKey(taskId, workId)}
       `.pipe(Effect.map((rows) => rows[0] ?? null));
@@ -780,10 +842,11 @@ export const layer = Layer.effect(
       readonly detail: string | null;
       readonly routeLabel: string | null;
       readonly updatedAt: string;
+      readonly worktreePath?: string | null;
     }) =>
       sql`
         INSERT INTO workflow_runs (
-          run_key, task_id, work_id, agent_index, status, thread_id, last_delivery_id, detail, route_label, updated_at
+          run_key, task_id, work_id, agent_index, status, thread_id, last_delivery_id, detail, route_label, updated_at, worktree_path
         ) VALUES (
           ${workflowRunKey(row.taskId, row.workId)},
           ${row.taskId},
@@ -794,7 +857,8 @@ export const layer = Layer.effect(
           ${row.deliveryId},
           ${row.detail},
           ${row.routeLabel},
-          ${row.updatedAt}
+          ${row.updatedAt},
+          ${row.worktreePath ?? null}
         )
         ON CONFLICT (run_key) DO UPDATE SET
           agent_index = excluded.agent_index,
@@ -803,7 +867,8 @@ export const layer = Layer.effect(
           last_delivery_id = excluded.last_delivery_id,
           detail = excluded.detail,
           route_label = excluded.route_label,
-          updated_at = excluded.updated_at
+          updated_at = excluded.updated_at,
+          worktree_path = COALESCE(excluded.worktree_path, workflow_runs.worktree_path)
       `;
 
     const localMachineBusy = Effect.fn("ScheduledTaskService.localMachineBusy")(function* () {
@@ -827,7 +892,12 @@ export const layer = Layer.effect(
       task: ScheduledTask,
       agent: WorkflowAgent,
       agentIndex: number,
-      event: { readonly deliveryId: string; readonly source: string; readonly text: string },
+      event: {
+        readonly deliveryId: string;
+        readonly source: string;
+        readonly text: string;
+        readonly workspaceStrategy?: OrchestrationV2ThreadLaunchWorkspaceStrategy;
+      },
     ) =>
       Effect.gen(function* () {
         if (yield* localMachineBusy()) return { launched: false as const };
@@ -951,7 +1021,7 @@ export const layer = Layer.effect(
 
     const latestWorkflowRuns = Effect.fn("ScheduledTaskService.latestWorkflowRuns")(function* () {
       const rows = yield* sql<WorkflowRow>`
-        SELECT run_key, task_id, work_id, agent_index, status, thread_id, last_delivery_id, detail, route_label
+        SELECT run_key, task_id, work_id, agent_index, status, thread_id, last_delivery_id, detail, route_label, worktree_path
         FROM workflow_runs
         ORDER BY updated_at DESC
       `;
@@ -967,7 +1037,7 @@ export const layer = Layer.effect(
     const advanceContinuingWorkflows = Effect.fn("ScheduledTaskService.advanceContinuingWorkflows")(
       function* () {
         const rows = yield* sql<WorkflowRow>`
-        SELECT run_key, task_id, work_id, agent_index, status, thread_id, last_delivery_id, detail, route_label
+        SELECT run_key, task_id, work_id, agent_index, status, thread_id, last_delivery_id, detail, route_label, worktree_path
         FROM workflow_runs
         WHERE status = 'running' AND thread_id IS NOT NULL
       `;
@@ -1035,6 +1105,14 @@ export const layer = Layer.effect(
                 deliveryId: `${row.last_delivery_id ?? row.work_id}:next`,
                 source: "workflow",
                 text: latest.text,
+                ...(row.worktree_path === null
+                  ? {}
+                  : {
+                      workspaceStrategy: {
+                        type: "existing_worktree" as const,
+                        worktreePath: row.worktree_path,
+                      },
+                    }),
               });
               if (!launch.launched) return;
               yield* writeWorkflowRun({
@@ -1346,6 +1424,496 @@ export const layer = Layer.effect(
         return { ...result, run: withWebhookPath(next) };
       });
 
+    const VERIFIER_PATCH_LIMIT = 1_000_000;
+
+    type HandoffRow = {
+      readonly id: string;
+      readonly project_id: string;
+      readonly thread_id: string;
+      readonly task_id: string;
+      readonly status: VerifierHandoff["status"];
+      readonly branch: string | null;
+      readonly base_ref: string | null;
+      readonly patch: string | null;
+      readonly detail: string | null;
+      readonly target_label: string | null;
+    };
+
+    const handoffView = (row: HandoffRow): VerifierHandoff => ({
+      id: row.id,
+      projectId: ProjectId.make(row.project_id),
+      threadId: ThreadId.make(row.thread_id),
+      taskId: ScheduledTaskId.make(row.task_id),
+      status: row.status,
+      branch: row.branch,
+      detail: row.detail,
+      targetLabel: row.target_label,
+    });
+
+    const readHandoff = (id: string) =>
+      sql<HandoffRow>`
+        SELECT id, project_id, thread_id, task_id, status, branch, base_ref, patch, detail, target_label
+        FROM verifier_handoffs
+        WHERE id = ${id}
+      `.pipe(Effect.map((rows) => rows[0] ?? null));
+
+    const listPendingHandoffs = Effect.fn("ScheduledTaskService.listPendingHandoffs")(function* () {
+      const rows = yield* sql<HandoffRow>`
+        SELECT id, project_id, thread_id, task_id, status, branch, NULL as base_ref, NULL as patch, detail, target_label
+        FROM verifier_handoffs
+        WHERE status = 'pending'
+        ORDER BY created_at ASC
+        LIMIT 20
+      `;
+      return { handoffs: rows.map(handoffView) };
+    });
+
+    const checkoutPatch = (vcs: GitVcsDriver.GitVcsDriver["Service"], cwd: string) =>
+      Effect.gen(function* () {
+        const tracked = yield* vcs.execute({
+          operation: "verifier.diff",
+          cwd,
+          args: ["diff", "--binary", "HEAD"],
+          allowNonZeroExit: true,
+          maxOutputBytes: VERIFIER_PATCH_LIMIT,
+        });
+        if (tracked.stdoutTruncated) {
+          return yield* taskError("The uncommitted diff is too large to send.");
+        }
+        const untracked = yield* vcs.execute({
+          operation: "verifier.untracked",
+          cwd,
+          args: ["ls-files", "--others", "--exclude-standard", "-z"],
+          allowNonZeroExit: true,
+        });
+        const files = untracked.stdout.split("\0").filter((file) => file.length > 0);
+        const parts = [tracked.stdout];
+        for (const file of files) {
+          const raw = yield* vcs.execute({
+            operation: "verifier.untrackedDiff",
+            cwd,
+            args: ["diff", "--no-index", "--binary", "--", "/dev/null", file],
+            allowNonZeroExit: true,
+            maxOutputBytes: VERIFIER_PATCH_LIMIT,
+          });
+          if (raw.stdoutTruncated) {
+            return yield* taskError("The uncommitted diff is too large to send.");
+          }
+          if (raw.stdout.trim().length > 0) parts.push(rewriteUntrackedDiff(file, raw.stdout));
+        }
+        const patch = parts.filter((part) => part.trim().length > 0).join("\n");
+        if (patch.length > VERIFIER_PATCH_LIMIT) {
+          return yield* taskError("The uncommitted diff is too large to send.");
+        }
+        return patch;
+      });
+
+    const prepareCheckout = (threadId: ThreadId) =>
+      Effect.gen(function* () {
+        const services = yield* requireVerifierServices();
+        const thread = yield* services.projections
+          .getThread(threadId)
+          .pipe(Effect.mapError((cause) => taskError("Could not read the thread.", { cause })));
+        const project = yield* services.projects
+          .get(thread.projectId)
+          .pipe(Effect.mapError((cause) => taskError("Could not read the project.", { cause })));
+        if (Option.isNone(project)) {
+          return yield* taskError("Could not read the project.");
+        }
+        const cwd = thread.worktreePath ?? project.value.workspaceRoot;
+        const details = yield* services.git
+          .statusDetails(cwd)
+          .pipe(Effect.mapError((cause) => taskError("Could not read the branch.", { cause })));
+        if (details.branch === null || details.branch.length === 0) {
+          return yield* taskError("Commit the work onto a branch before sending it to a verifier.");
+        }
+        yield* services.git
+          .pushCurrentBranch(cwd, details.branch)
+          .pipe(Effect.mapError((cause) => taskError("Could not push the branch.", { cause })));
+        const originHead = yield* services.git.execute({
+          operation: "verifier.originHead",
+          cwd,
+          args: ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+          allowNonZeroExit: true,
+        });
+        const baseRef =
+          originHead.exitCode === 0 ? originHead.stdout.trim().replace(/^origin\//, "") : "main";
+        const patch = yield* checkoutPatch(services.git, cwd).pipe(
+          Effect.mapError((cause) =>
+            Schema.is(ScheduledTaskError)(cause)
+              ? cause
+              : taskError("Could not read the uncommitted diff.", { cause }),
+          ),
+        );
+        return { branch: details.branch, baseRef, patch };
+      });
+
+    const subscribeVerifierHandoffs: ScheduledTaskService["Service"]["subscribeVerifierHandoffs"] =
+      () =>
+        Stream.unwrap(
+          Effect.gen(function* () {
+            const subscription = yield* PubSub.subscribe(changesPubSub);
+            return Stream.concat(
+              Stream.fromEffect(listPendingHandoffs()),
+              Stream.fromSubscription(subscription).pipe(
+                Stream.mapEffect(() => listPendingHandoffs()),
+              ),
+            );
+          }),
+        ).pipe(
+          Stream.mapError((cause) =>
+            Schema.is(ScheduledTaskError)(cause)
+              ? cause
+              : taskError("Could not list verifier sends.", { cause }),
+          ),
+        );
+
+    const claimVerifierHandoff: ScheduledTaskService["Service"]["claimVerifierHandoff"] = (input) =>
+      Effect.gen(function* () {
+        const now = iso(yield* localNow);
+        const claimed = yield* sql<{ id: string }>`
+          UPDATE verifier_handoffs
+          SET status = 'claimed', updated_at = ${now}
+          WHERE id = ${input.id} AND status = 'pending'
+          RETURNING id
+        `;
+        yield* notifyChanged;
+        return { claimed: claimed.length > 0 };
+      }).pipe(
+        Effect.mapError((cause) => taskError("Could not claim the verifier send.", { cause })),
+      );
+
+    const prepareVerifierHandoff: ScheduledTaskService["Service"]["prepareVerifierHandoff"] = (
+      input,
+    ) =>
+      Effect.gen(function* () {
+        const row = yield* readHandoff(input.id);
+        if (row === null) return yield* taskError("Verifier send was not found.");
+        const task = yield* loadTask(ScheduledTaskId.make(row.task_id));
+        if (task.schedule.type !== "webhook" || (task.schedule.agents?.length ?? 0) === 0) {
+          return yield* taskError("That task is not a verifier.", { taskId: task.id });
+        }
+        const prepared =
+          row.patch !== null && row.branch !== null && row.base_ref !== null
+            ? { branch: row.branch, baseRef: row.base_ref, patch: row.patch }
+            : yield* prepareCheckout(ThreadId.make(row.thread_id));
+        const now = iso(yield* localNow);
+        yield* sql`
+          UPDATE verifier_handoffs
+          SET branch = ${prepared.branch},
+              base_ref = ${prepared.baseRef},
+              patch = ${prepared.patch},
+              updated_at = ${now}
+          WHERE id = ${input.id}
+        `;
+        return {
+          branch: prepared.branch,
+          baseRef: prepared.baseRef,
+          patch: prepared.patch,
+          title: task.title,
+          prompt: task.prompt,
+          schedule: task.schedule,
+          modelSelection: task.modelSelection,
+          runtimeMode: task.runtimeMode,
+          interactionMode: task.interactionMode,
+          sourceTaskId: task.id,
+        };
+      }).pipe(
+        Effect.mapError((cause) =>
+          Schema.is(ScheduledTaskError)(cause)
+            ? cause
+            : taskError("Could not prepare the verifier send.", { cause }),
+        ),
+      );
+
+    const settleVerifierHandoff: ScheduledTaskService["Service"]["settleVerifierHandoff"] = (
+      input,
+    ) =>
+      Effect.gen(function* () {
+        const now = iso(yield* localNow);
+        yield* sql`
+          UPDATE verifier_handoffs
+          SET status = ${input.status},
+              detail = ${input.detail ?? null},
+              target_label = ${input.targetLabel ?? null},
+              updated_at = ${now}
+          WHERE id = ${input.id}
+        `;
+        yield* notifyChanged;
+        return { ok: true as const };
+      }).pipe(
+        Effect.mapError((cause) => taskError("Could not settle the verifier send.", { cause })),
+      );
+
+    const startVerifierRun: ScheduledTaskService["Service"]["startVerifierRun"] = (input) =>
+      Effect.gen(function* () {
+        const services = yield* requireVerifierServices();
+        if (input.schedule.type !== "webhook" || (input.schedule.agents?.length ?? 0) === 0) {
+          return yield* taskError("That task is not a verifier.");
+        }
+        const mirrorId = ScheduledTaskId.make(`scheduled-task:verifier:${input.sourceTaskId}`);
+        const existing = yield* findTask(mirrorId);
+        const now = yield* localNow;
+        const task: ScheduledTask =
+          existing ??
+          (yield* upsert({
+            id: mirrorId,
+            title: input.title,
+            prompt: input.prompt,
+            enabled: true,
+            schedule: input.schedule,
+            projectId: input.projectId,
+            threadId: null,
+            workspaceStrategy: {
+              type: "worktree",
+              baseRef: input.baseRef,
+              startFromOrigin: true,
+            },
+            modelSelection: input.modelSelection,
+            runtimeMode: input.runtimeMode,
+            interactionMode: input.interactionMode,
+            createdBy: "system",
+            creationSource: "server",
+          })).task;
+        if (existing !== null) {
+          yield* upsert({
+            id: mirrorId,
+            title: input.title,
+            prompt: input.prompt,
+            enabled: true,
+            schedule: input.schedule,
+            projectId: input.projectId,
+            threadId: null,
+            workspaceStrategy: existing.workspaceStrategy,
+            modelSelection: input.modelSelection,
+            runtimeMode: input.runtimeMode,
+            interactionMode: input.interactionMode,
+            createdBy: existing.createdBy,
+            creationSource: existing.creationSource,
+          });
+        }
+        const saved = yield* loadTask(mirrorId);
+        const agents = saved.schedule.type === "webhook" ? (saved.schedule.agents ?? []) : [];
+        const current = yield* readWorkflowRun(saved.id, input.branch);
+        if (current?.last_delivery_id === input.deliveryId) {
+          return {
+            threadId: current.thread_id === null ? null : ThreadId.make(current.thread_id),
+            workId: input.branch,
+          };
+        }
+        if (current?.status === "running") {
+          return yield* taskError("This branch is already being verified.", { taskId: saved.id });
+        }
+        const agentIndex =
+          current === null || current.status === "delivered" || current.status === "stopped"
+            ? 0
+            : current.status === "waiting"
+              ? current.agent_index + 1
+              : current.agent_index;
+        const agent = agents[agentIndex];
+        if (agent === undefined) {
+          return yield* taskError("The verifier has no agent to run.", { taskId: saved.id });
+        }
+        let worktreePath = current?.worktree_path ?? null;
+        if (agentIndex === 0) {
+          const project = yield* services.projects
+            .get(input.projectId)
+            .pipe(Effect.mapError((cause) => taskError("Could not read the project.", { cause })));
+          if (Option.isNone(project)) return yield* taskError("Could not read the project.");
+          const root = project.value.workspaceRoot;
+          yield* services.git
+            .execute({
+              operation: "verifier.fetch",
+              cwd: root,
+              args: [
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "origin",
+                `+refs/heads/${input.branch}:refs/remotes/origin/${input.branch}`,
+              ],
+              timeoutMs: 120_000,
+            })
+            .pipe(Effect.mapError((cause) => taskError("Could not fetch the branch.", { cause })));
+          const created = yield* services.git
+            .createWorktree({
+              cwd: root,
+              refName: `origin/${input.branch}`,
+              newRefName: `verifier-${DateTime.toEpochMillis(now).toString(36)}`,
+              baseRefName: input.baseRef,
+              path: null,
+            })
+            .pipe(
+              Effect.mapError((cause) => taskError("Could not prepare the worktree.", { cause })),
+            );
+          worktreePath = created.worktree.path;
+          if (input.patch.trim().length > 0) {
+            const applied = yield* services.git
+              .execute({
+                operation: "verifier.apply",
+                cwd: worktreePath,
+                args: ["apply", "--whitespace=nowarn"],
+                stdin: input.patch,
+                allowNonZeroExit: true,
+              })
+              .pipe(Effect.mapError((cause) => taskError("Could not apply the diff.", { cause })));
+            if (applied.exitCode !== 0) {
+              yield* services.git
+                .removeWorktree({ cwd: root, path: worktreePath, force: true })
+                .pipe(Effect.ignore);
+              return yield* taskError("Could not apply the uncommitted diff.");
+            }
+          }
+        }
+        const workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy =
+          worktreePath === null
+            ? { type: "worktree", baseRef: input.baseRef, startFromOrigin: true }
+            : { type: "existing_worktree", worktreePath };
+        const launch = yield* launchWorkflowAgent(saved, agent, agentIndex, {
+          deliveryId: input.deliveryId,
+          source: "verifier",
+          text: `Branch ${input.branch}`,
+          workspaceStrategy,
+        });
+        if (!launch.launched) {
+          return yield* taskError("The machine is busy.", { taskId: saved.id });
+        }
+        const updatedAt = iso(yield* localNow);
+        const failed = launch.task.lastRunStatus === "failed";
+        yield* writeWorkflowRun({
+          taskId: saved.id,
+          workId: input.branch,
+          agentIndex,
+          status: failed ? "stopped" : "running",
+          threadId: launch.threadId,
+          deliveryId: input.deliveryId,
+          detail: failed ? launch.task.lastRunError : routeLabel(agent),
+          routeLabel: routeLabel(agent),
+          updatedAt,
+          worktreePath,
+        });
+        yield* notifyChanged;
+        return {
+          threadId: launch.threadId === null ? null : ThreadId.make(launch.threadId),
+          workId: input.branch,
+        };
+      }).pipe(
+        Effect.mapError((cause) =>
+          Schema.is(ScheduledTaskError)(cause)
+            ? cause
+            : taskError("Could not start the verifier.", { cause }),
+        ),
+      );
+
+    const requestVerifierRun: ScheduledTaskService["Service"]["requestVerifierRun"] = (input) =>
+      Effect.gen(function* () {
+        const services = yield* requireVerifierServices();
+        const thread = yield* services.projections
+          .getThread(input.threadId)
+          .pipe(Effect.mapError((cause) => taskError("Could not read the thread.", { cause })));
+        const { tasks } = yield* list().pipe(
+          Effect.mapError((cause) => taskError("Could not list verifiers.", { cause })),
+        );
+        const verifiers = tasks.filter(
+          (task) =>
+            task.projectId === thread.projectId &&
+            task.enabled &&
+            task.schedule.type === "webhook" &&
+            (task.schedule.agents?.length ?? 0) > 0,
+        );
+        const task =
+          input.scheduledTaskId !== undefined
+            ? verifiers.find((candidate) => candidate.id === input.scheduledTaskId)
+            : input.title !== undefined
+              ? verifiers.find((candidate) => candidate.title === input.title)
+              : verifiers.length === 1
+                ? verifiers[0]
+                : undefined;
+        if (task === undefined) {
+          const names = verifiers.map((candidate) => candidate.title).join(", ");
+          return yield* taskError(
+            verifiers.length === 0
+              ? "This repo has no verifier."
+              : `This repo has more than one verifier. Pass scheduledTaskId. ${names}`,
+          );
+        }
+        const now = iso(yield* localNow);
+        const cutoff = iso(DateTime.subtract(yield* localNow, { minutes: 1 }));
+        yield* sql`
+          UPDATE verifier_handoffs
+          SET status = 'pending', updated_at = ${now}
+          WHERE thread_id = ${input.threadId}
+            AND task_id = ${task.id}
+            AND status = 'claimed'
+            AND updated_at < ${cutoff}
+        `;
+        const open = yield* sql<HandoffRow>`
+          SELECT id, project_id, thread_id, task_id, status, branch, base_ref, patch, detail, target_label
+          FROM verifier_handoffs
+          WHERE thread_id = ${input.threadId}
+            AND task_id = ${task.id}
+            AND status IN ('pending', 'claimed')
+          ORDER BY created_at DESC
+          LIMIT 1
+        `;
+        const existing = open[0] ?? null;
+        const createdId = yield* crypto.randomUUIDv4.pipe(
+          Effect.mapError((cause) => taskError("Could not start the verifier.", { cause })),
+        );
+        const id = existing?.id ?? `verifier-handoff:${createdId}`;
+        if (existing === null) {
+          yield* sql`
+            INSERT INTO verifier_handoffs (
+              id, project_id, thread_id, task_id, status, branch, base_ref, patch, detail, target_label, created_at, updated_at
+            ) VALUES (
+              ${id},
+              ${thread.projectId},
+              ${input.threadId},
+              ${task.id},
+              'pending',
+              NULL,
+              NULL,
+              NULL,
+              NULL,
+              NULL,
+              ${now},
+              ${now}
+            )
+          `;
+          yield* notifyChanged;
+        }
+        let row = existing;
+        let attempt = 0;
+        while (
+          attempt < 60 &&
+          (row === null || row.status === "pending" || row.status === "claimed")
+        ) {
+          yield* Effect.sleep("500 millis");
+          row = yield* readHandoff(id);
+          attempt += 1;
+        }
+        if (row === null || row.status === "pending" || row.status === "claimed") {
+          return yield* taskError(
+            "No other machine with this repo picked up the verifier. Keep the desktop connected and try again.",
+          );
+        }
+        if (row.status === "failed") {
+          return yield* taskError(row.detail ?? "The verifier could not be sent.");
+        }
+        return {
+          scheduledTaskId: task.id,
+          title: task.title,
+          branch: row.branch ?? "",
+          machine: row.target_label ?? "another machine",
+        };
+      }).pipe(
+        Effect.mapError((cause) =>
+          Schema.is(ScheduledTaskError)(cause)
+            ? cause
+            : taskError("Could not start the verifier.", { cause }),
+        ),
+      );
+
     return ScheduledTaskService.of({
       testWebhook,
       list,
@@ -1355,6 +1923,12 @@ export const layer = Layer.effect(
       delete: deleteTask,
       runNow,
       runWebhook,
+      subscribeVerifierHandoffs,
+      claimVerifierHandoff,
+      prepareVerifierHandoff,
+      settleVerifierHandoff,
+      startVerifierRun,
+      requestVerifierRun,
     });
   }),
 );

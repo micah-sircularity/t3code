@@ -567,6 +567,20 @@ export const OrchestratorMcpCreateWorkflowResult = Schema.Struct({
 });
 export type OrchestratorMcpCreateWorkflowResult = typeof OrchestratorMcpCreateWorkflowResult.Type;
 
+export const OrchestratorMcpRunVerifierInput = Schema.Struct({
+  scheduledTaskId: Schema.optional(ScheduledTaskId),
+  title: Schema.optional(TrimmedNonEmptyString),
+});
+export type OrchestratorMcpRunVerifierInput = typeof OrchestratorMcpRunVerifierInput.Type;
+
+export const OrchestratorMcpRunVerifierResult = Schema.Struct({
+  scheduledTaskId: ScheduledTaskId,
+  title: Schema.String,
+  branch: Schema.String,
+  machine: Schema.String,
+});
+export type OrchestratorMcpRunVerifierResult = typeof OrchestratorMcpRunVerifierResult.Type;
+
 export const OrchestratorMcpListScheduledTasksResult = Schema.Struct({
   tasks: Schema.Array(OrchestratorMcpScheduledTask),
 });

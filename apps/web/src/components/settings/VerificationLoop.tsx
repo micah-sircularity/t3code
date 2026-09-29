@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, ProviderInstanceId, WorkflowRunView } from "@t3tools/contracts";
+import { ChevronRightIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useEnvironmentSettings } from "../../hooks/useSettings";
@@ -22,6 +23,15 @@ import type { WorkflowAgentDraft } from "./scheduledTasksSettings.logic";
 
 function routeText(agent: WorkflowAgentDraft): string {
   return agent.route === "auto" ? "Auto balance" : agent.routeLabel || "Pinned machine";
+}
+
+/** A route worth stating once. Auto balance is the default, so a shared auto route stays off the row. */
+export function sharedStepRoute(agents: ReadonlyArray<WorkflowAgentDraft>): string | null {
+  const first = agents[0];
+  if (first === undefined) return null;
+  const label = routeText(first);
+  if (label === "Auto balance") return null;
+  return agents.every((agent) => routeText(agent) === label) ? label : null;
 }
 
 function modelText(modelKey: string): string | null {
@@ -52,13 +62,15 @@ function statusLabel(status: ReturnType<typeof agentStatus>): string | null {
   return null;
 }
 
-/** Read-only row of the verification loop. Editing stays in the list below the picture. */
+/** Read-only row of the verification loop. Editing stays in the fields under the picture. */
 export function VerificationPath(props: {
   readonly trigger: string;
   readonly agents: ReadonlyArray<WorkflowAgentDraft>;
   readonly delivery: string;
   readonly run?: WorkflowRunView | null | undefined;
 }) {
+  const showRoute =
+    sharedStepRoute(props.agents) === null && props.agents.some((agent) => agent.route !== "auto");
   const nodes = [
     { key: "trigger", title: "Trigger", detail: props.trigger },
     ...props.agents.map((agent, index) => ({
@@ -66,34 +78,51 @@ export function VerificationPath(props: {
       title: agent.name || "Agent",
       detail: [
         modelText(agent.modelKey),
-        routeText(agent),
+        showRoute ? routeText(agent) : null,
         statusLabel(agentStatus(index, props.run)),
       ]
-        .filter((part) => part !== null)
+        .filter((part) => part !== null && part !== "")
         .join(" · "),
     })),
     { key: "delivery", title: "Delivery", detail: props.delivery || "Record the result" },
   ];
   return (
-    <div className="flex items-stretch gap-2 overflow-x-auto py-1" aria-label="Verification loop">
+    <ol
+      className="flex w-full min-w-0 items-stretch overflow-x-auto"
+      aria-label="Verification loop"
+    >
       {nodes.map((node, index) => (
-        <div key={node.key} className="flex items-center gap-2">
+        <li key={node.key} className="flex min-w-0 items-stretch">
           {index > 0 ? (
-            <span className="text-xs text-muted-foreground" aria-hidden>
-              →
-            </span>
+            <ChevronRightIcon
+              className="mx-1 size-3.5 shrink-0 self-center text-muted-foreground"
+              aria-hidden
+            />
           ) : null}
-          <div className="min-w-36 rounded-lg border bg-card px-3 py-2">
-            <p className="text-sm font-medium">{node.title}</p>
-            <p className="text-xs text-muted-foreground">{node.detail}</p>
+          <div className="flex h-full w-40 shrink-0 flex-col justify-center gap-0.5 rounded-md bg-muted/40 px-2.5 py-1.5">
+            <p
+              className="line-clamp-2 text-xs font-medium leading-snug text-foreground"
+              title={node.title}
+            >
+              {node.title}
+            </p>
+            {node.detail ? (
+              <p
+                className="line-clamp-2 text-xs leading-snug text-muted-foreground"
+                title={node.detail}
+              >
+                {node.detail}
+              </p>
+            ) : null}
           </div>
-        </div>
+        </li>
       ))}
-    </div>
+    </ol>
   );
 }
 
 export function VerificationAgentFields(props: {
+  readonly trigger: string;
   readonly agents: ReadonlyArray<WorkflowAgentDraft>;
   readonly workKey: string;
   readonly deliverySummary: string;
@@ -111,7 +140,11 @@ export function VerificationAgentFields(props: {
     props.onChange({ agents, workKey: props.workKey, deliverySummary: props.deliverySummary });
   return (
     <div className="flex flex-col gap-3">
-      <VerificationPath trigger="Webhook" agents={props.agents} delivery={props.deliverySummary} />
+      <VerificationPath
+        trigger={props.trigger}
+        agents={props.agents}
+        delivery={props.deliverySummary}
+      />
       <div className="flex flex-col gap-2">
         <Label htmlFor="verification-work-key">Same work</Label>
         <Input

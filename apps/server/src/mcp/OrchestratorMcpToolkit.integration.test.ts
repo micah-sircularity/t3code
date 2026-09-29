@@ -465,6 +465,13 @@ const unusedScheduledTaskStubLayer = Layer.succeed(
     runNow: () => Effect.die("ScheduledTaskService.runNow is unused in this test"),
     runWebhook: () => Effect.die("ScheduledTaskService.runWebhook is unused in this test"),
     testWebhook: () => Effect.die("ScheduledTaskService.testWebhook is unused in this test"),
+    subscribeVerifierHandoffs: () => Stream.empty,
+    claimVerifierHandoff: () => Effect.die("ScheduledTaskService.claimVerifierHandoff is unused"),
+    prepareVerifierHandoff: () =>
+      Effect.die("ScheduledTaskService.prepareVerifierHandoff is unused"),
+    settleVerifierHandoff: () => Effect.die("ScheduledTaskService.settleVerifierHandoff is unused"),
+    startVerifierRun: () => Effect.die("ScheduledTaskService.startVerifierRun is unused"),
+    requestVerifierRun: () => Effect.die("ScheduledTaskService.requestVerifierRun is unused"),
   }),
 );
 
@@ -626,6 +633,16 @@ describe("orchestrator MCP toolkit", () => {
                 Effect.die("ScheduledTaskService.runWebhook is unused in this test"),
               testWebhook: () =>
                 Effect.die("ScheduledTaskService.testWebhook is unused in this test"),
+              subscribeVerifierHandoffs: () => Stream.empty,
+              claimVerifierHandoff: () =>
+                Effect.die("ScheduledTaskService.claimVerifierHandoff is unused"),
+              prepareVerifierHandoff: () =>
+                Effect.die("ScheduledTaskService.prepareVerifierHandoff is unused"),
+              settleVerifierHandoff: () =>
+                Effect.die("ScheduledTaskService.settleVerifierHandoff is unused"),
+              startVerifierRun: () => Effect.die("ScheduledTaskService.startVerifierRun is unused"),
+              requestVerifierRun: () =>
+                Effect.die("ScheduledTaskService.requestVerifierRun is unused"),
             }),
           );
           const testLayer = Layer.merge(

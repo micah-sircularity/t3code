@@ -36,6 +36,12 @@ const handlers = {
       const service = yield* OrchestratorMcpService;
       return yield* service.createWorkflow(scope, input);
     }),
+  run_verifier: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext;
+      const service = yield* OrchestratorMcpService;
+      return yield* service.runVerifier(scope, input);
+    }),
   schedule_task: (input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;

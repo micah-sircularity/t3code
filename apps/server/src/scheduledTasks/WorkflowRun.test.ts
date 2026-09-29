@@ -2,10 +2,21 @@ import { describe, expect, it } from "@effect/vitest";
 
 import {
   nextWorkflowStatus,
+  rewriteUntrackedDiff,
   routeLabel,
   verdictFromText,
   workIdFromPayload,
 } from "./WorkflowRun.ts";
+
+describe("rewriteUntrackedDiff", () => {
+  it("points the patch at the repo path", () => {
+    const raw = ["diff --git a/dev/null b/notes.md", "--- /dev/null", "+++ b/notes.md", ""].join(
+      "\n",
+    );
+    expect(rewriteUntrackedDiff("notes.md", raw)).toContain("diff --git a/notes.md b/notes.md");
+    expect(rewriteUntrackedDiff("notes.md", raw)).toContain("+++ b/notes.md");
+  });
+});
 
 describe("workIdFromPayload", () => {
   it("reads a nested id", () => {
