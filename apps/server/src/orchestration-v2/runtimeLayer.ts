@@ -258,13 +258,13 @@ const threadLifecycleProvided = threadLifecycleServiceLayer.pipe(
   Layer.provide(threadManagementProvided),
 );
 const scheduledTaskProvided = scheduledTaskServiceLayer.pipe(
+  Layer.provide(GitVcsDriver.layer),
   Layer.provide(
     Layer.mergeAll(
       threadLaunchProvided,
       threadManagementProvided,
       projectionStoreLayer,
       ProjectStore.layer,
-      GitVcsDriver.layer,
     ),
   ),
 );
