@@ -121,6 +121,7 @@ export function ScheduledTaskPromptEditor(props: {
       </div>
       {trigger !== null ? (
         <ComposerCommandMenu
+          listId="scheduled-task-skills"
           items={items}
           resolvedTheme={resolvedTheme}
           isLoading={false}
